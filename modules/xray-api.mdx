@@ -1,0 +1,92 @@
+---
+title: "xray gRPC API detection and config extraction"
+description: "XrayAPIDetector finds xray-core's gRPC HandlerService on localhost using HTTP/2 preface detection, then extracts config including encryption keys."
+---
+
+xray-core exposes a local gRPC management API (`HandlerService`, `StatsService`) that allows full configuration inspection — including inbound/outbound settings, encryption keys, server addresses, and SNI values. `XrayAPIDetector` probes a list of known ports using the HTTP/2 connection preface to identify gRPC servers, without sending any gRPC-specific frames. When the API is accessible, the entire xray configuration can be read by any app on the device.
+
+<Warning>
+**HAPP vulnerability.** The HAPP VPN client (`com.happproxy`) exposes the xray gRPC API with no authentication. Any other app — or a website via WebView — can connect to the API port, call `HandlerService`, and dump the full configuration including private keys, server IPs, and SNI domains. Uninstall HAPP immediately if detected.
+</Warning>
+
+## Detection method
+
+The HTTP/2 protocol requires every client to send a connection preface before any frames (RFC 7540, Section 3.5):
+
+```
+PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
+```
+
+After sending the preface, the server responds with a SETTINGS frame. An HTTP/2 SETTINGS frame has the following structure:
+
+```
+┌──────────────────────────────────┐
+│ Length       (3 bytes)           │
+│ Type = 0x04  (1 byte)  ◄── check │
+│ Flags        (1 byte)            │
+│ Stream ID    (4 bytes)           │
+│ Payload      (Length bytes)      │
+└──────────────────────────────────┘
+```
+
+`XrayAPIDetector` reads 64 bytes from the socket and checks that at least 9 bytes were received and that `buf[3] == 0x04`. This uniquely identifies HTTP/2 (and therefore gRPC) — plain HTTP/1.1 and SOCKS5 servers never respond with this frame structure.
+
+```kotlin
+val preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+// connect timeout: 500 ms, read timeout: 1000 ms
+if (n >= 9 && buf[3].toInt() and 0xFF == 0x04) {
+    // gRPC confirmed
+}
+```
+
+## Ports probed
+
+All ports are checked concurrently using `async`/`awaitAll`:
+
+| Port | Common configuration |
+|------|---------------------|
+| `10085` | xray API default (most configs) |
+| `19085` | XrayFluent Stats API |
+| `23456` | Alternative config |
+| `8001` | Alternative config |
+| `62789` | Non-standard / obfuscated |
+| `8080` | Shared with HTTP proxy configs |
+| `10086` | Alternative config |
+
+The first port to respond with a valid HTTP/2 SETTINGS frame is returned. The rest are cancelled.
+
+## What the API exposes
+
+If `XrayAPIInfo.accessible == true`, a gRPC client can call xray's management services on the same port:
+
+- **`HandlerService`** — add/remove inbounds and outbounds, read current config including:
+  - Outbound server addresses and ports
+  - Protocol settings (VLESS UUID, VMess ID, Shadowsocks password, Reality private key)
+  - TLS settings including SNI, fingerprint, and ALPN
+- **`StatsService`** — read per-user traffic statistics (leaks usernames configured in the server)
+
+<Note>
+`XrayAPIDetector` only performs the HTTP/2 preface check — it does not invoke any gRPC methods or read configuration data. The `details` field in `XrayAPIInfo` documents what could be extracted by a motivated attacker. Actual config extraction would require a gRPC client library.
+</Note>
+
+## XrayAPIInfo data class
+
+```kotlin
+data class XrayAPIInfo(
+    val port: Int,
+    val accessible: Boolean,
+    val details: String   // human-readable description of what was found
+)
+```
+
+When `accessible == true`, `details` contains a message such as:
+
+```
+xray gRPC API обнаружен на порту 10085!
+Возможные сервисы: HandlerService, StatsService
+HandlerService позволяет дампить ключи, IP, SNI!
+```
+
+## Relationship to Socks5Probe
+
+`Socks5Probe.probeGrpc()` uses the same HTTP/2 preface technique to classify an open port as `GRPC_SERVICE`. `XrayAPIDetector` goes further by targeting the specific ports used by xray-core and running all probes in parallel. Both modules can independently detect the same gRPC endpoint — the scanner reports whichever finds it first.

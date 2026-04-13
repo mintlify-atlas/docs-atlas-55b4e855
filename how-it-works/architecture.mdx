@@ -1,0 +1,170 @@
+---
+title: "ScanOrchestrator: YourVPNDead's 14-phase architecture"
+description: "YourVPNDead runs 14 sequential scan phases through ScanOrchestrator, collecting findings by severity without root or special permissions."
+---
+
+YourVPNDead organizes all detection logic inside a single `ScanOrchestrator` class. It runs 14 sequential phases, each handled by a dedicated module. Every phase appends zero or more `Finding` objects to a shared list, tagged with a `Severity` level. No root access or special Android permissions beyond `INTERNET`, `ACCESS_NETWORK_STATE`, and `QUERY_ALL_PACKAGES` are required.
+
+## ScanOrchestrator overview
+
+`ScanOrchestrator` is instantiated with an Android `Context` and composes all scanner modules at construction time:
+
+```kotlin
+class ScanOrchestrator(private val context: Context) {
+    private val profileDetector      = ProfileDetector(context)
+    private val procNetScanner       = ProcNetScanner()
+    private val portScanner          = PortScanner()
+    private val socks5Probe          = Socks5Probe()
+    private val authProbe            = AuthProbe()
+    private val clashAPIProbe        = ClashAPIProbe()
+    private val exitIPResolver       = ExitIPResolver()
+    private val xrayAPIDetector      = XrayAPIDetector()
+    private val deviceInfoCollector  = DeviceInfoCollector(context)
+    private val geoLocator           = GeoLocator()
+    private val directSignsChecker   = DirectSignsChecker(context)
+    private val indirectSignsChecker = IndirectSignsChecker(context)
+}
+```
+
+Both public entry points delegate to the same internal `doScan` function:
+
+```kotlin
+suspend fun quickScan(
+    onPhase: (ScanPhase) -> Unit = {},
+    onProgress: (Float) -> Unit = {}
+): ScanResult = doScan(fullRange = false, onPhase = onPhase, onProgress = onProgress)
+
+suspend fun fullScan(
+    onPhase: (ScanPhase) -> Unit = {},
+    onProgress: (Float) -> Unit = {}
+): ScanResult = doScan(fullRange = true, onPhase = onPhase, onProgress = onProgress)
+```
+
+### quickScan vs fullScan
+
+| Mode | Port coverage | Duration |
+|------|---------------|----------|
+| `quickScan` | ~40 known VPN client ports | Seconds |
+| `fullScan` | All 65 535 ports (200 parallel coroutines) | Minutes |
+
+All other phases — `/proc/net` parsing, API probing, auth analysis, exit IP resolution — are identical in both modes.
+
+## The ScanPhase enum
+
+Every phase is represented by a `ScanPhase` enum value with a human-readable `label` used in the UI:
+
+```kotlin
+enum class ScanPhase(val label: String) {
+    IDLE("Готов к скану"),
+    PROFILE_DETECT("Определение профиля и окружения..."),
+    DEVICE_INFO("Сбор информации об устройстве..."),
+    PROC_NET_SCAN("Анализ /proc/net/tcp..."),
+    DIRECT_SIGNS("Прямые признаки VPN/прокси..."),
+    INDIRECT_SIGNS("Косвенные признаки VPN..."),
+    PORT_SCAN("Сканирование портов..."),
+    PROXY_PROBE("Определение типов прокси..."),
+    API_DETECT("Поиск xray gRPC API..."),
+    CLASH_API("Поиск Clash REST API..."),
+    AUTH_PROBE("Проверка аутентификации и попытка перехвата..."),
+    EXIT_IP("Получение выходного IP..."),
+    GEO_LOOKUP("Геолокация IP..."),
+    DONE("Скан завершён");
+}
+```
+
+## Scan pipeline
+
+<Steps>
+  <Step title="PROFILE_DETECT — ProfileDetector">
+    Checks whether the app is running inside a Work Profile (Shelter, Island, Insular, Samsung Knox). Detects active VPN via `TRANSPORT_VPN` flag and enumerates TUN interfaces. Emits a `WARNING` finding if an isolated profile is detected, because profile isolation **does not protect loopback** — `127.0.0.1` is shared across all profiles.
+  </Step>
+  <Step title="PROC_NET_SCAN — ProcNetScanner">
+    Parses `/proc/net/tcp` and `/proc/net/tcp6` without root to list all ports in the `LISTEN` state on localhost. Identifies the VPN client by matching port patterns (for example, ports 10808 + 10809 + 19085 together indicate v2rayNG/xray). Also reads established connections to surface probable VPN server IPs when `vpnLikelihood >= 50`.
+  </Step>
+  <Step title="DIRECT_SIGNS — DirectSignsChecker">
+    Performs six direct checks using standard Android APIs: `NetworkCapabilities.hasTransport(TRANSPORT_VPN)`, the hidden `IS_VPN` and `VpnTransportInfo` strings in `caps.toString()`, `System.getProperty("http.proxyHost")` / `socksProxyHost`, `PackageManager.getPackageInfo()` against 20 known VPN packages, `NetworkInterface.getNetworkInterfaces()` for `tun*`/`tap*`/`wg*`/`ppp*` names, and `/proc/net/route` for VPN default routes.
+  </Step>
+  <Step title="INDIRECT_SIGNS — IndirectSignsChecker">
+    Checks five indirect indicators: `NET_CAPABILITY_NOT_VPN` absence, MTU anomalies via `NetworkInterface.getMTU()` (VPN overhead reduces MTU by 60–120 bytes), DNS servers in private subnets via `LinkProperties.getDnsServers()`, and `Runtime.exec("dumpsys vpn_management")` / `dumpsys activity services VpnService` (normally inaccessible to unprivileged apps).
+  </Step>
+  <Step title="DEVICE_INFO — DeviceInfoCollector">
+    Collects a `DeviceFingerprint`: model, manufacturer, Android version, SDK level, board, hardware, build fingerprint, active network interfaces, and the device's direct IP. Used to correlate findings and populate the scan report.
+  </Step>
+  <Step title="PORT_SCAN — PortScanner">
+    TCP-connects to both `127.0.0.1` (IPv4) and `::1` (IPv6 localhost). In `quickScan`, probes ~40 known ports. In `fullScan`, sweeps all 65 535 ports using 200 parallel coroutines. Returns a list of `OpenPort(port, responseMs)` objects. If no ports are open, the pipeline returns early with a `SAFE` finding.
+  </Step>
+  <Step title="PROXY_PROBE — Socks5Probe">
+    For each open port, `Socks5Probe.probe(port)` sends protocol-specific bytes to classify the service as `SOCKS5_NO_AUTH`, `SOCKS5_AUTH_REQUIRED`, `SOCKS5_REJECTED`, `HTTP_PROXY_OPEN`, `HTTP_PROXY_AUTH`, `GRPC_SERVICE`, or `UNKNOWN`. Ports classified as vulnerable emit a `CRITICAL` finding.
+  </Step>
+  <Step title="API_DETECT — XrayAPIDetector">
+    Sends an HTTP/2 connection preface followed by an empty SETTINGS frame to ports 10085, 19085, 23456, 8001, 62789, 8080, and 10086. A valid response identifies an xray gRPC API (HandlerService). A confirmed gRPC endpoint allows dumping the xray config including encryption keys and emits a `CRITICAL` finding.
+  </Step>
+  <Step title="CLASH_API — ClashAPIProbe">
+    Queries the Clash/mihomo REST API on ports 9090 and 19090. Makes unauthenticated `GET` requests to `/connections`, `/proxies`, and `/configs`. The `/connections` endpoint returns `destinationIP` for every active tunnel — a distinct IP leak independent of SOCKS5 authentication. Emits a `CRITICAL` finding listing all leaked IPs.
+  </Step>
+  <Step title="AUTH_PROBE — AuthProbe">
+    For each detected SOCKS5 port, attempts credential brute-force with common pairs (admin/admin, test/test, proxy/proxy, etc.) and checks whether `UDP ASSOCIATE` works without per-packet authentication (RFC 1928 Section 7). Also demonstrates that raw socket interception is blocked on standard Android builds.
+  </Step>
+  <Step title="EXIT_IP — ExitIPResolver">
+    For every unauthenticated SOCKS5 proxy found, tunnels through it to `api.ipify.org` using a `CONNECT` request. The response body is the VPN server's real exit IP — not the device IP. Each resolved IP is stored in `ExitIPInfo(ip, port)`.
+  </Step>
+  <Step title="GEO_LOOKUP — GeoLocator">
+    Resolves every collected VPN server IP (from SOCKS5 exit probing, `/proc/net` established connections, and host routes in `/proc/net/route`) against `ip-api.com`. Returns `GeoInfo` with country, city, ISP, AS number, and proxy/hosting flags. All resolved servers are consolidated into a final `CRITICAL` finding listing every leaked IP with geolocation.
+  </Step>
+  <Step title="DONE">
+    Progress is set to `1.0f`. `doScan` returns the complete `ScanResult`.
+  </Step>
+</Steps>
+
+## ScanResult data model
+
+`ScanResult` aggregates the output of all phases:
+
+```kotlin
+data class ScanResult(
+    val timestamp: Long = System.currentTimeMillis(),
+    val device: DeviceFingerprint? = null,      // Model, SDK, network interfaces
+    val profile: ProfileInfo? = null,            // Work Profile / Knox isolation status
+    val openPorts: List<OpenPort> = emptyList(), // TCP-reachable ports on localhost
+    val listeningPorts: List<ListeningPort> = emptyList(), // From /proc/net/tcp
+    val vpnClientGuesses: List<VpnClientGuess> = emptyList(), // Identified clients
+    val directSigns: DirectSignsResult? = null,  // NetworkCapabilities, interfaces, routes
+    val indirectSigns: IndirectSignsResult? = null, // MTU, DNS, dumpsys
+    val proxies: List<ProxyInfo> = emptyList(),  // Classified proxy types per port
+    val exitIPs: List<ExitIPInfo> = emptyList(), // VPN server IPs via SOCKS5
+    val xrayAPI: XrayAPIInfo? = null,            // xray gRPC API if detected
+    val clashAPI: ClashAPIResult? = null,        // Clash REST API if detected
+    val authProbes: List<AuthProbeResult> = emptyList(), // Auth analysis per port
+    val findings: List<Finding> = emptyList()    // All findings ordered by phase
+)
+```
+
+The `isVulnerable` computed property is `true` when any proxy is vulnerable, or when the xray or Clash API is accessible:
+
+```kotlin
+val isVulnerable: Boolean get() = vulnerableCount > 0
+    || xrayAPI?.accessible == true
+    || clashAPI?.accessible == true
+```
+
+## Findings and severity
+
+Every phase appends `Finding` objects to the shared list:
+
+```kotlin
+data class Finding(
+    val severity: Severity,
+    val title: String,
+    val description: String,
+    val details: Map<String, String> = emptyMap()
+)
+
+enum class Severity(val label: String, val emoji: String) {
+    CRITICAL("Critical",     "🔴"),
+    WARNING ("Warning",      "🟡"),
+    INFO    ("Information",  "🔵"),
+    SAFE    ("Safe",         "🟢")
+}
+```
+
+`CRITICAL` findings represent actionable leaks: an open unauthenticated SOCKS5 proxy, a reachable xray gRPC API, a leaked Clash API, or a resolved VPN server IP. `SAFE` findings confirm that a check passed cleanly.

@@ -1,0 +1,153 @@
+---
+title: "NekoBox and Hiddify: sing-box SOCKS5 exposure"
+description: "NekoBox (port 2080) and Hiddify expose unauthenticated sing-box SOCKS5 proxies. Karing and Throne are also affected with similar default configs."
+---
+
+Several popular Android VPN clients are built on [sing-box](https://sing-box.sagernet.org/), an open-source proxy platform. By default, sing-box starts a "mixed" inbound (SOCKS5 + HTTP on the same port) on localhost with no authentication. NekoBox, Hiddify, Karing, and Throne all ship with this configuration, making them exploitable by any co-installed app. Husi also uses sing-box but has authentication enabled and is not affected.
+
+<Warning>
+CVE-2023-43644 — sing-box SOCKS5 authentication bypass (CVSS 9.1). Some versions of sing-box fail to enforce authentication even when it is configured. Always verify your client is fully patched and that authentication is actively rejected by running YourVPNDead.
+</Warning>
+
+## NekoBox
+
+NekoBox (`moe.nb4a`) is one of the most widely deployed sing-box frontends on Android.
+
+| Property | Value |
+|---|---|
+| Package name | `moe.nb4a` |
+| Core | sing-box |
+| Default mixed port | 2080 |
+| Auth by default | None |
+| Status | Vulnerable |
+
+NekoBox configures a sing-box "mixed" listener on `127.0.0.1:2080`. This single port accepts both SOCKS5 and HTTP CONNECT connections without any authentication challenge. `ProcNetScanner` identifies NekoBox (and Throne) by the presence of port 2080 in `/proc/net/tcp`:
+
+```kotlin
+if (2080 in portNumbers) {
+    guesses.add(VpnClientGuess(
+        name = "sing-box (NekoBox / Throne / Husi)",
+        confidence = 80,
+        evidence = listOf("Mixed :2080")
+    ))
+}
+```
+
+The `CLIENT_SIGNATURES` map labels port 2080 as `"NekoBox / Throne (sing-box mixed)"`.
+
+## Hiddify
+
+Hiddify (`app.hiddify.com`) supports both sing-box and xray-core backends depending on the selected profile.
+
+| Property | Value |
+|---|---|
+| Package name | `app.hiddify.com` |
+| Core | sing-box or xray-core (profile-dependent) |
+| Default SOCKS5 port | Profile-dependent |
+| Auth by default | None |
+| Status | Vulnerable |
+
+When running a sing-box backend, Hiddify exposes a localhost SOCKS5 proxy on the configured mixed port. When running xray-core, it exposes an inbound on port 10808 (same as v2rayNG). In both cases no authentication is required. YourVPNDead detects Hiddify's exposure through port scanning and the SOCKS5 handshake, regardless of which backend is active.
+
+## Karing
+
+Karing uses sing-box and configures two separate inbound ports:
+
+| Property | Value |
+|---|---|
+| Package name | Unknown (not in `AndroidManifest.xml` queries) |
+| Core | sing-box |
+| Full proxy port | 3066 |
+| SOCKS5 rule-based port | 3067 |
+| Auth by default | None |
+| Status | Vulnerable |
+
+`ProcNetScanner` identifies Karing by the 3066 + 3067 port pair:
+
+```kotlin
+if (3067 in portNumbers || 3066 in portNumbers) {
+    guesses.add(VpnClientGuess(
+        name = "Karing",
+        confidence = 85,
+        evidence = buildList {
+            if (3067 in portNumbers) add("SOCKS5 :3067")
+            if (3066 in portNumbers) add("Full proxy :3066")
+        }
+    ))
+}
+```
+
+The `CLIENT_SIGNATURES` map defines:
+
+- `3066` → `"Karing (HTTP/SOCKS5 full proxy)"`
+- `3067` → `"Karing (SOCKS5 rule-based)"`
+
+## Throne
+
+Throne uses sing-box and shares the same default port 2080 as NekoBox. It is not included in the `AndroidManifest.xml` `<queries>` block, so YourVPNDead detects it only through port scanning rather than package presence.
+
+| Property | Value |
+|---|---|
+| Package name | Unknown (not in `AndroidManifest.xml` queries) |
+| Core | sing-box |
+| Default mixed port | 2080 |
+| Auth by default | None |
+| Status | Vulnerable |
+
+## sing-box Clash API — an additional exposure on port 19090
+
+Beyond the SOCKS5 proxy, sing-box also exposes a Clash-compatible REST API on port 19090 (and sometimes 9090) without authentication. This is a separate vulnerability from the SOCKS5 inbound.
+
+<Warning>
+The Clash API on port 19090 leaks all destination IPs, not just the VPN server address. It is independent of the SOCKS5 proxy — even if SOCKS5 auth is enabled, the Clash API can still be open.
+</Warning>
+
+`ProcNetScanner` identifies this exposure directly:
+
+```kotlin
+if (19090 in portNumbers) {
+    guesses.add(VpnClientGuess(
+        name = "sing-box Clash API (LEAK RISK)",
+        confidence = 90,
+        evidence = listOf("Clash API :19090")
+    ))
+}
+```
+
+The Clash API endpoints that are accessible without authentication include:
+
+| Endpoint | What it exposes |
+|---|---|
+| `GET /connections` | All active connections including `destinationIP` for every flow |
+| `GET /proxies` | List of configured proxy servers and their addresses |
+| `GET /configs` | Full running configuration |
+
+An app querying `GET /connections` can enumerate every host your device has connected to through the VPN in real time — this goes well beyond knowing the VPN server's exit IP.
+
+## Husi — the protected sing-box client
+
+Husi (`io.nekohasekai.sfa`) uses the same sing-box core but ships with authentication enabled on its local SOCKS5 inbound. The `Socks5Probe` handshake receives `\x05\xFF` (no acceptable method) rather than `\x05\x00`, and the proxy cannot be used without credentials. Husi is not vulnerable to the SOCKS5 exposure described on this page.
+
+## CVE-2023-43644 — sing-box SOCKS5 auth bypass
+
+[CVE-2023-43644](https://github.com/advisories/GHSA-r5hm-mp3j-285g) (CVSS 9.1) documents a flaw in older sing-box versions where authentication enforcement could be bypassed entirely. Even clients that configured a username and password were exploitable. Users of NekoBox, Hiddify, Karing, and Throne should verify they are running a patched sing-box version. YourVPNDead's `AuthProbe` confirms whether a password-protected proxy actually rejects unauthenticated connections, independently of what the client's UI reports.
+
+## Detection summary
+
+<Steps>
+  <Step title="ProcNetScanner identifies the client by port pattern">
+    Port 2080 → NekoBox / Throne. Ports 3066 + 3067 → Karing. Port 19090 → sing-box Clash API leak risk. Results are available without root by reading `/proc/net/tcp`.
+  </Step>
+  <Step title="PortScanner confirms with TCP connect">
+    A direct TCP connect to each detected port on `127.0.0.1` (and `::1`) confirms the listener is reachable. Some sing-box builds bind to IPv6 loopback only.
+  </Step>
+  <Step title="Socks5Probe completes the no-auth handshake">
+    Sends `\x05\x01\x00` to the mixed port. Receiving `\x05\x00` confirms unauthenticated SOCKS5 is accepted. The probe also checks `UDP ASSOCIATE` support (RFC 1928 Section 7).
+  </Step>
+  <Step title="ClashAPIProbe queries port 19090">
+    YourVPNDead's `ClashAPIProbe` sends `GET /connections` to port 19090. A JSON response confirms the Clash API is open and returns live connection data including destination IP addresses.
+  </Step>
+  <Step title="ExitIPResolver resolves the VPN server IP">
+    Routes a `CONNECT api.ipify.org` request through the unauthenticated mixed port and geolocates the returned exit IP via ip-api.com.
+  </Step>
+</Steps>

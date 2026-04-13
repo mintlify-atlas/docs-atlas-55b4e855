@@ -1,0 +1,113 @@
+---
+title: "ClashAPIProbe: detect unauthenticated Clash REST API"
+description: "ClashAPIProbe detects unauthenticated Clash/mihomo REST API on localhost, extracting active connections, proxy names, and VPN server IPs."
+---
+
+sing-box and mihomo (the engine behind ClashMeta for Android, NekoBox, Karing, and similar clients) expose a Clash-compatible REST API on localhost. By default this API runs without authentication. `ClashAPIProbe` queries three endpoints on each of the known API ports and extracts active connection metadata — including the destination IP of every proxied connection, which directly reveals the VPN server's address.
+
+<Warning>
+This is a separate vulnerability from an open SOCKS5 proxy. Even when the SOCKS5 inbound is password-protected, the Clash API may remain open on a different port. An attacker only needs to reach the API port to dump all active connections.
+</Warning>
+
+## API ports probed
+
+| Port | Common use |
+|------|------------|
+| `9090` | Standard Clash / mihomo API |
+| `19090` | sing-box Clash API (many client defaults) |
+| `9091` | Alternative |
+| `9097` | Clash Verge |
+
+`probe()` iterates these ports in order and returns the first `ClashAPIResult` where `/configs` returns HTTP 200.
+
+## Endpoints queried
+
+<AccordionGroup>
+  <Accordion title="GET /configs — liveness check and mode">
+    The first endpoint queried. A successful response confirms the API is accessible. The `mode` field (`"rule"`, `"global"`, `"direct"`) is extracted from the JSON body.
+
+    ```json
+    {
+      "mode": "rule",
+      "port": 7890,
+      "socks-port": 7891,
+      "allow-lan": false,
+      ...
+    }
+    ```
+  </Accordion>
+  <Accordion title="GET /connections — the primary leak">
+    Returns every active proxied connection. The `metadata.destinationIP` field contains the resolved IP of the remote server — this is the VPN server exit IP, exposed without any authentication.
+
+    Example response:
+
+    ```json
+    {
+      "downloadTotal": 1048576,
+      "uploadTotal": 204800,
+      "connections": [
+        {
+          "id": "a1b2c3d4",
+          "upload": 1024,
+          "download": 65536,
+          "chains": ["DIRECT", "PROXY"],
+          "rule": "MATCH",
+          "rulePayload": "",
+          "metadata": {
+            "network": "tcp",
+            "type": "SOCKS5",
+            "sourceIP": "127.0.0.1",
+            "sourcePort": "54321",
+            "destinationIP": "185.220.101.47",
+            "host": "example.com",
+            "processPath": "/data/app/com.example/.../base.apk"
+          }
+        }
+      ]
+    }
+    ```
+
+    `destinationIP` (`185.220.101.47` above) is the VPN server's public IP address. All unique non-zero destination IPs are collected into `leakedDestIPs`.
+  </Accordion>
+  <Accordion title="GET /proxies — configured proxy list">
+    Returns the names of all configured proxy nodes. These are the proxy profile names defined in the VPN client configuration (e.g., `"Frankfurt-01"`, `"VLESS-TLS"`, `"SB-Reality"`). Collected into `proxyNames`.
+  </Accordion>
+</AccordionGroup>
+
+## Data classes
+
+```kotlin
+data class ClashAPIResult(
+    val port: Int,
+    val accessible: Boolean,
+    val mode: String,                   // "rule", "global", "direct"
+    val connections: List<ClashConnection>,
+    val proxyNames: List<String>,
+    val leakedDestIPs: List<String>,    // unique non-zero destinationIP values
+    val totalUpload: Long,              // bytes, from /connections root
+    val totalDownload: Long
+)
+
+data class ClashConnection(
+    val id: String,
+    val destinationIP: String,          // VPN server IP — the primary leak
+    val host: String,                   // target hostname
+    val processPath: String,            // originating app path
+    val network: String,                // "tcp" or "udp"
+    val sourceIP: String,
+    val sourcePort: String,
+    val upload: Long,
+    val download: Long,
+    val chains: List<String>,           // proxy chain (e.g. ["DIRECT", "PROXY"])
+    val rule: String,
+    val rulePayload: String
+)
+```
+
+## Why port 19090 matters
+
+Port `19090` is the default Clash API port in the official sing-box Android client (SFA) and many forks (Throne, Husi). When port `9090` is not open but `19090` is, the device is almost certainly running sing-box with a default or minimally customised configuration.
+
+<Note>
+`ProcNetScanner.CLIENT_SIGNATURES` maps port `19090` to `"sing-box Clash API"` and flags it as a `LEAK RISK` in `VpnClientGuess` results — the same conclusion reached by a successful `ClashAPIProbe` response.
+</Note>

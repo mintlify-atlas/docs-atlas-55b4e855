@@ -1,0 +1,161 @@
+---
+title: "How to protect your VPN from SOCKS5 proxy IP leaks"
+description: "Harden your Android VPN setup against SOCKS5 proxy leaks, Clash API exposure, and xray gRPC API attacks detected by YourVPNDead's 14-phase scan."
+---
+
+YourVPNDead shows you the same information a hostile app can collect about your VPN in under one second. Most leaks come from three sources: an unauthenticated SOCKS5 proxy on localhost, an exposed Clash REST API, or an accessible xray gRPC API. The mitigations below address each vulnerability type. After applying them, run a full scan to confirm nothing remains open.
+
+## Client security status
+
+Before diving into mitigations, check whether your current client can be secured at all.
+
+| Client | Core | Default SOCKS5 port | Auth by default | Can be secured |
+|--------|------|---------------------|-----------------|----------------|
+| v2rayNG | xray | 10808 | No | Yes — disable or add auth |
+| NekoBox | sing-box | 2080 | No | Yes — disable local proxy port |
+| Hiddify | sing-box / xray | varies | No | Yes — disable mixed port |
+| v2RayTun | xray | varies | No | Yes — disable inbound |
+| Karing | sing-box | 3067 | No | Yes — disable local proxy |
+| Throne | sing-box | varies | No | Yes — disable local proxy |
+| **Happ** | xray | varies | No + gRPC API open | **No — uninstall immediately** |
+| Husi | sing-box | varies | Yes | Already protected |
+| Clash / mihomo | mihomo | disabled | N/A | Already protected |
+| WireGuard (official) | WireGuard | none | N/A | No SOCKS5 exposed |
+
+<Warning>
+Happ exposes an xray gRPC HandlerService on localhost that cannot be secured without replacing the app. If Happ is installed on your device, uninstall it before reading further.
+</Warning>
+
+## Mitigations by vulnerability type
+
+### Disable or restrict the local SOCKS5 proxy
+
+All popular proxy-based VPN clients create a SOCKS5 inbound on `127.0.0.1` for per-app routing and split tunneling. Without authentication, any app with `INTERNET` permission can connect through this proxy and resolve your VPN server's exit IP in under one second.
+
+<Steps>
+  <Step title="v2rayNG">
+    Open v2rayNG settings. Under **Inbound** (or **Local proxy**), either set the **SOCKS port** to `0` to disable it entirely, or enable **Auth** and set a username and password. If you do not use per-app routing, disabling the inbound is the safer choice.
+  </Step>
+  <Step title="NekoBox">
+    Go to **Settings → Basic**. Set **Local proxy port** (mixed inbound) to `0` or toggle the local proxy off. NekoBox uses sing-box as its core; the port is typically 2080.
+  </Step>
+  <Step title="Hiddify">
+    Open **Settings → Advanced**. Find **Local mixed port** (or **Inbound port**) and set it to `0` or disable it. Hiddify supports both xray and sing-box cores; check both inbound sections if you have switched cores.
+  </Step>
+  <Step title="Karing and Throne">
+    These clients expose sing-box mixed inbounds on ports 3066–3067. Disable the local inbound in **Settings → Proxy settings** if per-app routing is not needed.
+  </Step>
+  <Step title="General rule">
+    If you route all traffic through the VPN and do not use per-app split tunneling, there is no reason to keep a local SOCKS5 proxy running. Disable it. If you need split tunneling, enable SOCKS5 authentication — see the **Enable authentication** step below.
+  </Step>
+</Steps>
+
+### Secure or disable the Clash API
+
+mihomo (Clash Meta) and sing-box expose a REST API on localhost — by default on port 9090 (mihomo) or 19090 (sing-box). Without a secret token, any app can query `/connections` to retrieve all active VPN connection destinations, proxy server addresses, and traffic statistics.
+
+<Steps>
+  <Step title="Set an API secret">
+    In your mihomo or sing-box config file, add a `secret` field to the `external-controller` section:
+
+    ```yaml mihomo config.yaml
+    external-controller: 127.0.0.1:9090
+    secret: "your-strong-secret-here"
+    ```
+
+    For sing-box, add it to the `experimental.clash_api` block:
+
+    ```json sing-box config.json
+    {
+      "experimental": {
+        "clash_api": {
+          "external_controller": "127.0.0.1:19090",
+          "secret": "your-strong-secret-here"
+        }
+      }
+    }
+    ```
+  </Step>
+  <Step title="Disable the API if not needed">
+    If you do not use a Clash dashboard, remove the `external-controller` / `clash_api` block entirely. The API port will not open.
+  </Step>
+  <Step title="Never bind to all interfaces">
+    Ensure the controller address is `127.0.0.1:PORT`, not `0.0.0.0:PORT`. Binding to `0.0.0.0` exposes the API to every app on the device and to other devices on the same local network.
+  </Step>
+</Steps>
+
+<Note>
+Even if your SOCKS5 proxy requires a password, the Clash API is a separate surface. YourVPNDead checks both independently. Securing one does not secure the other.
+</Note>
+
+### Uninstall Happ
+
+Happ exposes an xray gRPC HandlerService (`HandlerService` over HTTP/2) on localhost. YourVPNDead detects it using the standard HTTP/2 connection preface followed by an empty SETTINGS frame. If accessible, a hostile app can dump the full xray configuration, including server addresses, UUIDs, and encryption keys.
+
+There is no configuration change that mitigates this — the exposure is architectural. Uninstall Happ and switch to a client that can be secured (v2rayNG with the inbound disabled, or Husi which enforces authentication).
+
+<Steps>
+  <Step title="Uninstall Happ">
+    Long-press the Happ icon → **Uninstall**, or use **Settings → Apps → Happ → Uninstall**.
+  </Step>
+  <Step title="Install a replacement">
+    v2rayNG and Husi are compatible replacements. Import your existing server configs via a share link or subscription URL.
+  </Step>
+  <Step title="Re-run YourVPNDead">
+    After switching clients, run a full scan to confirm no xray gRPC port (10085, 19085, 23456, 8001, 62789) remains accessible.
+  </Step>
+</Steps>
+
+### Enable SOCKS5 authentication
+
+If you need per-app routing and cannot disable the local proxy, enable username/password authentication as defined in [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929). This prevents unauthenticated connections — but note that [CVE-2023-43644](https://github.com/advisories/GHSA-r5hm-mp3j-285g) (CVSS 9.1) documented a case where sing-box auth could be bypassed. Keep your client updated.
+
+<Steps>
+  <Step title="v2rayNG">
+    In **Settings → Inbound**, enable **Auth**, then set a **Username** and **Password**. Use a non-trivial password — YourVPNDead's `AuthProbe` tests common defaults such as `admin/admin`, `test/test`, and `proxy/proxy`.
+  </Step>
+  <Step title="sing-box-based clients (NekoBox, Hiddify, Karing)">
+    Edit the inbound config directly. In the sing-box JSON, set `"type": "mixed"` inbound to include a `users` array:
+
+    ```json sing-box inbound
+    {
+      "type": "mixed",
+      "listen": "127.0.0.1",
+      "listen_port": 2080,
+      "users": [
+        { "username": "youruser", "password": "yourpassword" }
+      ]
+    }
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Android Work Profile (Shelter, Island, Insular, Samsung Knox) does **not** isolate the loopback interface. `127.0.0.1` is shared across all user profiles on the same device. An app in your personal profile can reach a SOCKS5 proxy opened by a VPN client in your work profile, and vice versa. Profile isolation is not a substitute for disabling or authenticating the proxy.
+</Warning>
+
+### Verify with YourVPNDead
+
+After applying the changes above, run a new full scan.
+
+<Steps>
+  <Step title="Open YourVPNDead and tap Full Scan">
+    Wait for all 14 phases to complete. Pay attention to findings marked CRITICAL or WARNING.
+  </Step>
+  <Step title="Check SOCKS5 results">
+    In the port scan results, any open port should show `SOCKS5 (auth)` or `SOCKS5 (rejected)` — not `SOCKS5 (no auth)`. An open unauthenticated proxy is a CRITICAL finding.
+  </Step>
+  <Step title="Check Clash API results">
+    The Clash API section should show the API as inaccessible, or accessible only with a secret. An open `/connections` endpoint is a separate CRITICAL finding.
+  </Step>
+  <Step title="Confirm no xray gRPC port">
+    The xray API section should show no accessible gRPC service. Ports 10085, 19085, 23456, 8001, 62789, 8080, and 10086 are checked.
+  </Step>
+  <Step title="Check exit IP">
+    If no exit IP is resolved through a local proxy, the SOCKS5 leak vector is closed. The scan will report it as not exploitable.
+  </Step>
+</Steps>
+
+<Tip>
+Run the scan immediately after changing VPN client settings and again after installing any new app. YourVPNDead is a point-in-time scanner — it does not monitor continuously.
+</Tip>

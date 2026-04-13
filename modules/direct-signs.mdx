@@ -1,0 +1,176 @@
+---
+title: "Direct VPN detection with DirectSignsChecker"
+description: "DirectSignsChecker uses NetworkCapabilities, system properties, PackageManager, and /proc/net/route to detect VPN activity without root."
+---
+
+`DirectSignsChecker` performs a set of entirely local, root-free checks that any installed Android app can run. Each check reads data the Android framework already exposes — no network requests are needed except for the optional split tunnel comparison. The full check is invoked via `fullCheck()`, which runs all sub-checks on the IO dispatcher and returns a `DirectSignsResult`.
+
+## Checks overview
+
+| # | Check | Android API | Signal |
+|---|-------|-------------|--------|
+| 1 | `TRANSPORT_VPN` flag | `NetworkCapabilities.hasTransport()` | Active VPN transport |
+| 2 | `IS_VPN` hidden flag | `NetworkCapabilities.toString()` | Internal VPN marker |
+| 3 | `VpnTransportInfo` string | `NetworkCapabilities.toString()` | VPN transport metadata |
+| 4 | HTTP proxy system property | `System.getProperty("http.proxyHost")` | HTTP proxy configured |
+| 5 | SOCKS proxy system property | `System.getProperty("socksProxyHost")` | SOCKS proxy configured |
+| 6 | Known port comparison | Port lookup in `KNOWN_PROXY_PORTS` | Recognised proxy port |
+| 7 | Installed VPN apps | `PackageManager.getPackageInfo()` | Known VPN app present |
+| 8 | VPN network interfaces | `NetworkInterface.getNetworkInterfaces()` | tun/tap/wg/ppp/ipsec up |
+| 9 | Routing table default route | `/proc/net/route` | Non-standard default gateway |
+| 10 | VPN server host route | `/proc/net/route` mask `FFFFFFFF` | /32 via real interface |
+| 11 | Split tunnel detection | `ifconfig.me` direct vs proxy IP | Per-app routing bypass |
+
+## Check details
+
+### 1–3. NetworkCapabilities (`checkVpnTransport`)
+
+`ConnectivityManager.getNetworkCapabilities(activeNetwork)` returns a `NetworkCapabilities` object. Three signals are read from it:
+
+- **`TRANSPORT_VPN`** — public API (`NetworkCapabilities.TRANSPORT_VPN`), set when the active network is a VPN.
+- **`IS_VPN`** — internal Android flag, not part of the public API. Detected by checking if `caps.toString()` contains the string `"IS_VPN"`.
+- **`VpnTransportInfo`** — internal transport metadata object. Detected by checking `caps.toString()` for `"VpnTransportInfo"`.
+
+Any one of the three is sufficient for `detected = true` in `VpnTransportDetection`.
+
+### 4–6. System proxy properties (`checkSystemProxy`)
+
+```kotlin
+val httpHost  = System.getProperty("http.proxyHost")
+val httpPort  = System.getProperty("http.proxyPort")
+val socksHost = System.getProperty("socksProxyHost")
+val socksPort = System.getProperty("socksProxyPort")
+```
+
+When a VPN client sets a system-wide proxy, these JVM system properties are visible to every app in every process. The detected port is compared against `KNOWN_PROXY_PORTS`:
+
+| Port | Label |
+|------|-------|
+| `1080` | SOCKS5 default |
+| `9000` | SOCKS / v2ray |
+| `5555` | SOCKS |
+| `8080` | HTTP proxy |
+| `3128` | HTTP proxy (Squid) |
+| `9050` | Tor SOCKS |
+| `9150` | Tor Browser SOCKS |
+
+### 7. Installed VPN app detection (`checkKnownVpnApps`)
+
+`PackageManager.getPackageInfo(packageName, 0)` is called for each of 20 known package names. On Android 11+, the app must declare `<queries>` entries or `QUERY_ALL_PACKAGES` in its manifest; without this, `NameNotFoundException` is thrown for packages that haven't declared visibility.
+
+<Info>
+On Android 11 and above, detection silently fails for packages not listed in the calling app's `<queries>` block. The check still runs — it just returns `installed = false` for hidden packages.
+</Info>
+
+The 20 packages checked:
+
+| Package | App name |
+|---------|----------|
+| `com.v2ray.ang` | v2rayNG |
+| `io.nekohasekai.sfa` | sing-box (SFA) |
+| `app.hiddify.com` | Hiddify |
+| `com.github.metacubex.clash.meta` | ClashMeta for Android |
+| `com.github.shadowsocks` | Shadowsocks |
+| `com.github.shadowsocks.tv` | Shadowsocks TV |
+| `com.happproxy` | HAPP VPN |
+| `io.github.saeeddev94.xray` | XrayNG |
+| `moe.nb4a` | NekoBox |
+| `io.github.dovecoteescapee.byedpi` | ByeDPI |
+| `com.romanvht.byebyedpi` | ByeByeDPI |
+| `org.outline.android.client` | Outline |
+| `com.psiphon3` | Psiphon |
+| `org.getlantern.lantern` | Lantern |
+| `com.wireguard.android` | WireGuard |
+| `com.strongswan.android` | strongSwan |
+| `org.torproject.android` | Tor Browser |
+| `info.guardianproject.orfox` | Orbot |
+| `org.torproject.torbrowser` | Tor Browser (official) |
+| `org.amnezia.vpn` | Amnezia VPN |
+
+### 8. VPN network interface detection (`checkNetworkInterfaces`)
+
+`NetworkInterface.getNetworkInterfaces()` enumerates all network interfaces. Each interface name is matched against these patterns:
+
+| Pattern (regex) | Type | Protocols |
+|-----------------|------|-----------|
+| `^tun\d+` | TUN | OpenVPN, WireGuard TUN, Android VpnService |
+| `^tap\d+` | TAP | OpenVPN TAP mode |
+| `^wg\d+` | WireGuard | WireGuard native kernel |
+| `^ppp\d+` | PPP | L2TP / PPTP |
+| `^ipsec.*` | IPSec | IPSec VPN |
+
+Only interfaces where `isUp == true` are returned. Each match produces an `InterfaceDetection` with `vpnIndicator = true`.
+
+### 9–10. Routing table analysis (`checkRoutingTable`)
+
+`/proc/net/route` is read line by line (world-readable on all Android versions). Each line has the format:
+
+```
+Iface  Destination  Gateway  Flags  RefCnt  Use  Metric  Mask  MTU  Window  IRTT
+```
+
+Destination and mask are stored as little-endian hex. `DirectSignsChecker` converts them to dotted-decimal via `hexToIp()`.
+
+Two derived signals:
+
+- **Default VPN route** (`isVpnRoute`): destination `00000000` (0.0.0.0) via an interface that does **not** start with `wlan`, `rmnet`, `eth`, or `lo`.
+- **VPN server host route** (`isVpnServerRoute`): mask `FFFFFFFF` (/32) via a non-TUN, non-loopback interface (wlan/rmnet/eth). Android adds this route automatically so that VPN tunnel traffic bypasses the TUN interface and reaches the actual VPN server.
+
+### 11. Split tunnel detection (`checkSplitTunnel`)
+
+Split tunnel detection makes two outbound HTTP requests:
+
+1. Direct request to `https://ifconfig.me/ip` (falls back to `https://api.ipify.org`) — records the app's own exit IP.
+2. Request through the system HTTP proxy (if `http.proxyHost` is set) to `https://api.ipify.org` — records the proxy exit IP.
+
+If the two IPs differ, `isSplitTunnel = true`, confirming that the VPN is routing traffic selectively and other apps can escape through the exposed proxy.
+
+## Data classes
+
+```kotlin
+data class DirectSignsResult(
+    val vpnTransport: VpnTransportDetection,
+    val systemProxy: SystemProxyDetection,
+    val installedVpnApps: List<InstalledVpnApp>,
+    val interfaces: List<InterfaceDetection>,
+    val routingEntries: List<RoutingEntry>,
+    val splitTunnel: SplitTunnelResult?
+)
+
+data class VpnTransportDetection(
+    val hasTransportVpn: Boolean,
+    val hasIsVpnFlag: Boolean,
+    val hasVpnTransportInfo: Boolean,
+    val capsString: String,
+    val detected: Boolean
+)
+
+data class SystemProxyDetection(
+    val httpProxyHost: String?,
+    val httpProxyPort: String?,
+    val socksProxyHost: String?,
+    val socksProxyPort: String?,
+    val isKnownPort: Boolean,
+    val knownPortLabel: String?,
+    val detected: Boolean
+)
+
+data class RoutingEntry(
+    val destination: String,
+    val gateway: String,
+    val interfaceName: String,
+    val mask: String,
+    val flags: String,
+    val isDefaultRoute: Boolean,
+    val isVpnRoute: Boolean,
+    val isHostRoute: Boolean,
+    val isVpnServerRoute: Boolean
+)
+
+data class SplitTunnelResult(
+    val directIp: String?,
+    val proxyIp: String?,
+    val isSplitTunnel: Boolean,
+    val details: String
+)
+```

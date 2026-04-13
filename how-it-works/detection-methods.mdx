@@ -1,0 +1,169 @@
+---
+title: "Five VPN detection method categories in YourVPNDead"
+description: "YourVPNDead uses five categories of detection: NetworkCapabilities flags, /proc/net parsing, port scanning, API probing, and MTU/DNS analysis."
+---
+
+YourVPNDead groups its detection techniques into five categories. None require root access or elevated permissions. Each category uses a distinct Android API or Linux virtual filesystem, and each produces findings that are independently meaningful — a VPN may be invisible to one category but clearly visible to another.
+
+## API reference
+
+| Method | Android API or system file | Checker class |
+|--------|---------------------------|---------------|
+| `TRANSPORT_VPN` flag | `NetworkCapabilities.hasTransport(TRANSPORT_VPN)` | `DirectSignsChecker` |
+| `IS_VPN` hidden flag | `NetworkCapabilities.toString()` string search | `DirectSignsChecker` |
+| `VpnTransportInfo` class | `NetworkCapabilities.toString()` string search | `DirectSignsChecker` |
+| System proxy variables | `System.getProperty("http.proxyHost")` / `"socksProxyHost"` | `DirectSignsChecker` |
+| Installed VPN apps | `PackageManager.getPackageInfo()` | `DirectSignsChecker` |
+| VPN network interfaces | `NetworkInterface.getNetworkInterfaces()` | `DirectSignsChecker` |
+| Routing table | `/proc/net/route` | `DirectSignsChecker` |
+| Listening ports | `/proc/net/tcp`, `/proc/net/tcp6` | `ProcNetScanner` |
+| Established connections | `/proc/net/tcp`, `/proc/net/udp` | `ProcNetScanner` |
+| TCP port scan | `Socket.connect()` to `127.0.0.1` and `::1` | `PortScanner` |
+| SOCKS5 handshake | RFC 1928 bytes over TCP | `Socks5Probe` |
+| HTTP CONNECT probe | HTTP/1.1 CONNECT request | `Socks5Probe` |
+| gRPC detection | HTTP/2 preface + SETTINGS frame | `Socks5Probe` / `XrayAPIDetector` |
+| Clash REST API | HTTP GET `/connections`, `/proxies`, `/configs` | `ClashAPIProbe` |
+| MTU measurement | `NetworkInterface.getMTU()` | `IndirectSignsChecker` |
+| DNS server check | `LinkProperties.getDnsServers()` | `IndirectSignsChecker` |
+| `NET_CAPABILITY_NOT_VPN` | `NetworkCapabilities.hasCapability(NET_CAPABILITY_NOT_VPN)` | `IndirectSignsChecker` |
+
+---
+
+## Category 1: Direct network flags
+
+`DirectSignsChecker` inspects the active network's `NetworkCapabilities` object for three distinct signals.
+
+**`TRANSPORT_VPN`** is part of the public Android API:
+
+```kotlin
+val caps = connectivityManager.getNetworkCapabilities(network)
+caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) // true when VPN is active
+```
+
+A `true` result means the OS has registered a VPN transport on the active network. This is the most reliable single signal, but some VPN implementations or split-tunnel configurations may not expose it on every network.
+
+**`IS_VPN`** and **`VpnTransportInfo`** are not part of the public SDK but appear in the string representation of the capabilities object:
+
+```kotlin
+caps.toString().contains("IS_VPN")           // internal OS flag
+caps.toString().contains("VpnTransportInfo") // transport class name
+```
+
+Both are implementation details of Android's `NetworkCapabilities` serialization. They provide redundancy when `hasTransport()` returns an unexpected value.
+
+**System proxy variables** are set by VPN clients that configure a system-wide SOCKS or HTTP proxy instead of (or in addition to) a TUN interface:
+
+```kotlin
+System.getProperty("http.proxyHost")   // e.g. "127.0.0.1"
+System.getProperty("socksProxyHost")   // e.g. "127.0.0.1"
+```
+
+A non-null value indicates the VPN client has set a global proxy. The port is cross-referenced against a list of known proxy ports (1080, 9050, 8080, and others).
+
+**Installed VPN apps** are detected by iterating 20 known package names:
+
+```kotlin
+context.packageManager.getPackageInfo(packageName, 0)
+```
+
+Checked packages include v2rayNG, sing-box (SFA), Hiddify, ClashMeta, Shadowsocks, HAPP, XrayNG, NekoBox, ByeDPI, ByeByeDPI, Outline, Psiphon, Lantern, WireGuard, strongSwan, Tor Browser, Orbot, and others.
+
+**VPN interfaces** are found by scanning `NetworkInterface.getNetworkInterfaces()` for names matching `tun\d+`, `tap\d+`, `wg\d+`, `ppp\d+`, or `ipsec.*`. The presence of such an interface is a strong indicator even when `TRANSPORT_VPN` is not reported.
+
+**Routing table** analysis reads `/proc/net/route` directly. A default route (`destination = 0.0.0.0`, mask = `0.0.0.0`) via an interface other than `wlan0` or `rmnet*` indicates VPN routing. Host routes (`/32`) to non-private IPs suggest the VPN server's IP is being routed directly.
+
+---
+
+## Category 2: /proc/net parsing
+
+`ProcNetScanner` reads `/proc/net/tcp` and `/proc/net/tcp6` without root access. These pseudo-files are world-readable on most Android versions.
+
+**Listening ports** are identified by the socket state field `0A` (LISTEN). Each entry includes the local address in hex, the UID owning the socket, and whether it is bound to all interfaces (`0.0.0.0`) or only loopback (`127.0.0.1`).
+
+VPN client identity is inferred from port patterns:
+
+| Ports observed | Identified client |
+|----------------|-------------------|
+| 10808 + 10809 + 19085 | v2rayNG / XrayFluent (xray SOCKS + HTTP + Stats API) |
+| 2080 | NekoBox / Throne (sing-box mixed) |
+| 7890 + 7891 + 9090 | Clash / mihomo (HTTP + SOCKS + REST API) |
+| 3066 + 3067 | Karing |
+| 19090 | sing-box Clash API |
+
+**Established connections** are read from both `/proc/net/tcp` and `/proc/net/udp`. Each entry's remote IP is scored with a `vpnLikelihood` percentage based on destination port, IP range, and protocol. Connections with `vpnLikelihood >= 50` are surfaced as probable VPN server addresses and geolocated. This method can reveal the actual VPN server IP without any active probing.
+
+---
+
+## Category 3: TCP port scanning
+
+`PortScanner` attempts `Socket.connect()` with a short timeout to each candidate port on both `127.0.0.1` (IPv4) and `::1` (IPv6 localhost). Some VPN clients bind only on the IPv6 loopback interface, making IPv4-only scanning insufficient.
+
+- **`scanKnownPorts()`** — used in `quickScan`, probes ~40 ports including xray (10808–10810), sing-box (2080–2081, 3066–3067), mihomo (7890–7893), stats APIs (10085, 19085, 9090), and ports from the Russian Ministry of Digital Development detection guide (9000, 5555, 9050, 3128, 8080), Yandex.Metrica (29009–29010, 30102–30103), and Meta Pixel (12387–12591).
+- **`scanFullRange()`** — used in `fullScan`, probes all 65 535 ports with 200 parallel coroutines.
+
+A successful connection returns an `OpenPort(port, responseMs)`. Open ports are passed to `Socks5Probe` for protocol classification.
+
+---
+
+## Category 4: Protocol probing
+
+`Socks5Probe` classifies each open port by sending protocol-specific bytes and inspecting the response.
+
+**SOCKS5** (RFC 1928) handshake:
+
+```
+Client → Server:  05 01 00        (version 5, 1 method: no-auth)
+Server → Client:  05 00           (accepted: no-auth)   → SOCKS5_NO_AUTH
+Server → Client:  05 02           (accepted: password)  → SOCKS5_AUTH_REQUIRED
+Server → Client:  05 FF           (rejected)            → SOCKS5_REJECTED
+```
+
+`SOCKS5_NO_AUTH` is the vulnerable state — any app can tunnel arbitrary TCP connections through it without credentials.
+
+**HTTP CONNECT** is probed by sending `CONNECT 127.0.0.1:80 HTTP/1.1\r\n\r\n` and reading the status line. A `200 Connection established` response classifies the port as `HTTP_PROXY_OPEN`. A `407 Proxy Authentication Required` response classifies it as `HTTP_PROXY_AUTH`.
+
+**gRPC / HTTP/2** is detected by sending the HTTP/2 connection preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) followed by a 9-byte empty SETTINGS frame. A server that responds with its own SETTINGS frame is a gRPC service (`GRPC_SERVICE`). This is how `XrayAPIDetector` identifies xray's HandlerService.
+
+`AuthProbe` additionally attempts brute-force of SOCKS5 credentials and checks whether `UDP ASSOCIATE` (RFC 1928 Section 7) works without per-packet authentication.
+
+---
+
+## Category 5: REST API querying
+
+`ClashAPIProbe` sends unauthenticated HTTP GET requests to the Clash/mihomo REST API, which sing-box and mihomo expose on ports 9090 and 19090 by default.
+
+The three endpoints queried:
+
+| Endpoint | What it returns |
+|----------|----------------|
+| `GET /connections` | All active tunnels with `destinationIP`, source/dest ports, process path, upload/download bytes |
+| `GET /proxies` | Named proxy server list with addresses |
+| `GET /configs` | Active configuration including mode, listen ports, and log level |
+
+The `/connections` response directly leaks destination IPs of all tunneled traffic. Even if SOCKS5 authentication is enabled, the Clash API may remain unauthenticated — these are independent attack surfaces. A `ClashAPIResult` with non-empty `leakedDestIPs` triggers a `CRITICAL` finding.
+
+---
+
+## Category 5 continued: MTU and DNS analysis
+
+These checks run inside `IndirectSignsChecker` as indirect VPN indicators.
+
+**MTU measurement** uses `NetworkInterface.getMTU()` on every active interface. Standard Ethernet and Wi-Fi MTU is 1500 bytes. VPN encapsulation consumes header space, reducing the effective MTU:
+
+| VPN protocol | Typical MTU | Overhead |
+|--------------|-------------|----------|
+| WireGuard | ~1420 | ~80 bytes |
+| OpenVPN | ~1400 | ~100 bytes |
+| VLESS / Trojan (xray) | 1380–1400 | ~100–120 bytes |
+
+An interface with MTU below 1500 that is also the default route is flagged as an anomaly. Result is stored in `MtuCheckResult` with per-interface `MtuInterface` entries and an `anomalyDetected` boolean.
+
+**DNS private subnet detection** reads the DNS server addresses from `ConnectivityManager.getLinkProperties(network).dnsServers`. A DNS address in `192.168.0.0/16`, `10.0.0.0/8`, or `172.16.0.0/12` (or in Tailscale's `100.64.0.0/10` CGNAT range) indicates that the VPN tunnel is routing DNS queries internally. Result is stored in `DnsCheckResult` with the full server list and the subset that matched private ranges.
+
+**`NET_CAPABILITY_NOT_VPN`** is checked via:
+
+```kotlin
+caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+```
+
+Android adds this capability to every non-VPN network. Its absence means the OS classifies the active network as a VPN network, making this a reliable secondary confirmation independent of `TRANSPORT_VPN`.

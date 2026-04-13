@@ -1,0 +1,106 @@
+---
+title: "Security CVEs, RFCs, and research behind YourVPNDead"
+description: "Research papers, CVEs, RFC specifications, and investigative reports behind YourVPNDead's detection techniques and threat model. Includes CVE-2023-43644."
+---
+
+YourVPNDead's detection methods are grounded in documented vulnerabilities, published research, and protocol specifications. This page lists every primary source that informed the scanner's design. Understanding these references helps you assess the real-world threat level and evaluate the mitigations.
+
+<Note>
+The threat model behind YourVPNDead has two layers. The first is protocol-level: standard TCP connections to `127.0.0.1` can probe any listening service without special permissions. The second is ecosystem-level: large-scale actors (analytics SDKs, state-adjacent applications) have been documented doing exactly this in production. The references below establish both layers.
+</Note>
+
+## CVEs
+
+<AccordionGroup>
+  <Accordion title="CVE-2023-43644 — sing-box SOCKS5 authentication bypass (CVSS 9.1)">
+    **Affected software**: sing-box and all applications built on it, including NekoBox, Hiddify, Karing, and Throne.
+
+    **Summary**: The SOCKS5 authentication implementation in sing-box could be bypassed under specific handshake conditions, allowing an unauthenticated client to complete the SOCKS5 negotiation despite auth being configured.
+
+    **CVSS score**: 9.1 (Critical)
+
+    **GitHub Security Advisory**: [GHSA-r5hm-mp3j-285g](https://github.com/advisories/GHSA-r5hm-mp3j-285g)
+
+    **Relevance to YourVPNDead**: `AuthProbe` tests the SOCKS5 handshake using the RFC 1928 no-auth method code (`0x00`). A port that accepts this method despite auth being configured is reported as CRITICAL. This CVE established that auth configuration alone is insufficient — the implementation must be verified.
+  </Accordion>
+</AccordionGroup>
+
+## RFCs
+
+These protocol specifications define the exact byte sequences YourVPNDead uses to identify and classify proxy services.
+
+| RFC | Title | Relevance |
+|-----|-------|-----------|
+| [RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928) | SOCKS Protocol Version 5 | Defines the handshake YourVPNDead uses in `Socks5Probe`: `\x05\x01\x00` (greeting, 1 method, no-auth). A `\x05\x00` response confirms an open proxy. |
+| [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) | Username/Password Authentication for SOCKS5 | Defines the sub-negotiation used when a SOCKS5 server selects method `0x02`. `AuthProbe` follows this spec when testing password-protected proxies. |
+
+<Info>
+RFC 1928 Section 7 defines UDP ASSOCIATE — a mechanism for UDP proxying. YourVPNDead tests whether UDP ASSOCIATE can be initiated without per-packet authentication, which is a separate bypass vector from the TCP handshake.
+</Info>
+
+## Research papers
+
+<AccordionGroup>
+  <Accordion title="LocalMess: Meta and Yandex localhost scanning (USENIX Security 2026)">
+    **URL**: [https://localmess.github.io/](https://localmess.github.io/)
+
+    **Conference**: USENIX Security Symposium 2026
+
+    **Summary**: This research documents large-scale localhost scanning performed by production analytics SDKs. The findings include:
+
+    - **Yandex.Metrica** has been issuing HTTP requests to `127.0.0.1` since at least 2017, targeting ports used by development tools, local servers, and proxy clients.
+    - **Meta Pixel** uses WebRTC STUN SDP Munging to enumerate LAN and localhost addresses without explicit socket connections, bypassing some network monitoring tools.
+
+    The research demonstrates that localhost scanning is not a theoretical attack — it is embedded in SDKs present in millions of apps. Any Android device with an app that includes either SDK is subject to the same probes that YourVPNDead performs.
+
+    **Relevance to YourVPNDead**: The known-port list in `PortScanner` includes the specific ports targeted by Yandex.Metrica (29009–29010, 30102–30103) and Meta Pixel (12387–12591) as documented in this research.
+  </Accordion>
+</AccordionGroup>
+
+## Investigative reports
+
+<AccordionGroup>
+  <Accordion title="Critical VLESS vulnerability — Habr (Russian)">
+    **URL**: [https://habr.com/ru/articles/1020080/](https://habr.com/ru/articles/1020080/)
+
+    **Title**: Критическая уязвимость VLESS (Critical VLESS vulnerability)
+
+    **Summary**: This article describes the xray gRPC API exposure vector in detail, including how `HandlerService` can be queried to dump server configuration from a running xray-core instance. It covers the Happ client specifically and explains why the exposure is architectural rather than a misconfiguration.
+
+    **Relevance to YourVPNDead**: `XrayAPIDetector` was designed based on the attack surface described in this article. The HTTP/2 detection method (connection preface + SETTINGS frame) and the port list (10085, 19085, 23456, 8001, 62789) are derived from this research.
+  </Accordion>
+
+  <Accordion title="Mintsifry VPN detection methodology (2024–2026)">
+    **Context**: Russia's Ministry of Digital Development (Минцифры) published internal documentation describing methods for detecting VPN usage on citizen devices. The methodology covers open-port enumeration, MTU anomaly detection, DNS server analysis, and network interface fingerprinting.
+
+    **Relevance to YourVPNDead**: The indirect detection checks in `IndirectSignsChecker` — MTU anomaly detection, private-subnet DNS server identification, and `NET_CAPABILITY_NOT_VPN` inspection — are explicitly modeled after the checks described in this methodology. YourVPNDead shows users what this methodology can detect against their setup.
+  </Accordion>
+
+  <Accordion title="Roskomnadzor DPI (TSPU) blocking">
+    **Context**: Roskomnadzor (Russia's federal media regulator) operates Deep Packet Inspection hardware (ТСПУ — Технические средства противодействия угрозам) at the ISP level to block VPN protocols. While TSPU operates at the network level rather than the device level, it represents the broader enforcement context in which device-level detection is the next logical step.
+
+    **Relevance to YourVPNDead**: The threat model assumes that network-level blocking and device-level detection are complementary. TSPU blocks known VPN protocol signatures at the ISP; device-level detection via open ports and local proxy scanning bypasses encrypted transport entirely by querying the proxy directly from a co-installed app.
+  </Accordion>
+
+  <Accordion title="Yandex.Metrica localhost scanning (2017 original report)">
+    **Context**: Independent security researchers documented that the Yandex.Metrica SDK, present in a large number of Russian-market Android apps, was sending HTTP requests to `127.0.0.1` across a range of ports. This was reported in 2017 and confirmed in subsequent analyses.
+
+    **Relevance to YourVPNDead**: This established that localhost scanning as an attack vector has been deployed at scale for nearly a decade. The technique requires no special permissions and is indistinguishable from legitimate SDK behavior from the OS's perspective.
+  </Accordion>
+
+  <Accordion title="Meta Pixel WebRTC STUN SDP Munging">
+    **Context**: Meta Pixel's use of WebRTC STUN SDP Munging to enumerate local network addresses was documented as part of the LocalMess research and in independent browser security analyses. The technique sends a crafted SDP offer that causes the browser (or WebView) to attempt STUN binding requests to specified addresses, revealing whether a given IP:port is reachable.
+
+    **Relevance to YourVPNDead**: This technique targets local network scanning rather than `127.0.0.1` specifically, but establishes the same principle: widely distributed SDK code performing covert network reconnaissance without explicit socket API calls that would be visible to monitoring tools.
+  </Accordion>
+</AccordionGroup>
+
+## v2rayNG issue tracker references
+
+The following v2rayNG GitHub issues document the history of the SOCKS5 unauthenticated inbound as a known security concern in the community:
+
+- **Issue #275**: Early report of the unauthenticated SOCKS5 inbound creating a proxy accessible to all apps on the device.
+- **Issue #1911**: Discussion of per-app routing and the side effect of an open local proxy.
+- **Issue #3670**: Request for SOCKS5 authentication support and documentation of the IP leak vector.
+
+These issues predate YourVPNDead and demonstrate that the vulnerability has been known to the v2ray community for years before systematic scanning tools were available.

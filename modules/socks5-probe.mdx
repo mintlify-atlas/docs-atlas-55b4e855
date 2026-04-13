@@ -1,0 +1,165 @@
+---
+title: "Socks5Probe: classify proxies with RFC 1928 handshake"
+description: "Socks5Probe identifies proxy type on each open port using RFC 1928 handshake, HTTP CONNECT probing, gRPC detection, and credential brute-force."
+---
+
+Once `PortScanner` identifies open ports on localhost, `Socks5Probe` determines what kind of service is listening on each one. Three protocol-level handshakes are attempted in order — SOCKS5, HTTP CONNECT, and gRPC — stopping at the first successful identification. `AuthProbe` then extends the SOCKS5 analysis with credential brute-force, method enumeration, and a UDP ASSOCIATE test.
+
+## ProxyType enum
+
+```kotlin
+enum class ProxyType(val label: String, val icon: String) {
+    SOCKS5_NO_AUTH("SOCKS5 (без auth)", "🔴"),
+    SOCKS5_AUTH_REQUIRED("SOCKS5 (auth)", "🟢"),
+    SOCKS5_REJECTED("SOCKS5 (отказано)", "🟢"),
+    HTTP_PROXY_OPEN("HTTP proxy (открыт)", "🔴"),
+    HTTP_PROXY_AUTH("HTTP proxy (auth)", "🟢"),
+    GRPC_SERVICE("gRPC сервис", "⚠️"),
+    UNKNOWN("Неизвестный сервис", "⚪")
+}
+
+data class ProxyInfo(
+    val port: Int,
+    val type: ProxyType,
+    val vulnerable: Boolean,
+    val details: String
+)
+```
+
+`vulnerable = true` is set for `SOCKS5_NO_AUTH`, `HTTP_PROXY_OPEN`, and `GRPC_SERVICE` — these allow unauthenticated tunneling or API access.
+
+## SOCKS5 handshake (RFC 1928)
+
+The SOCKS5 greeting identifies the authentication method the server accepts. `Socks5Probe` offers both `0x00` (no authentication) and `0x02` (username/password):
+
+```
+Client → Server:  05 02 00 02
+                  │  │  │  └─ method: username/password (0x02)
+                  │  │  └──── method: no auth (0x00)
+                  │  └─────── NMETHODS = 2
+                  └────────── VER = 5
+
+Server → Client:  05 [method]
+                  │   └──── 0x00 = no auth selected → SOCKS5_NO_AUTH
+                  │         0x02 = password required → SOCKS5_AUTH_REQUIRED
+                  │         0xFF = no acceptable method → SOCKS5_REJECTED
+                  └──── VER = 5
+```
+
+The response is validated by checking that the first byte is `0x05`. Any other first byte means the service is not SOCKS5, and the probe returns `null` so the next protocol can be tried.
+
+## HTTP CONNECT probe
+
+If the SOCKS5 handshake fails, a plain HTTP CONNECT request is sent:
+
+```
+CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n
+```
+
+The response status code determines the type:
+
+| HTTP status | ProxyType | vulnerable |
+|-------------|-----------|-----------|
+| `200` | `HTTP_PROXY_OPEN` | `true` |
+| `407` | `HTTP_PROXY_AUTH` | `false` |
+| Other | `HTTP_PROXY_AUTH` | `false` |
+
+## gRPC detection (HTTP/2 connection preface)
+
+If neither SOCKS5 nor HTTP CONNECT succeeds, the HTTP/2 client connection preface is sent:
+
+```
+PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
+```
+
+The server response is read into a 64-byte buffer. A valid HTTP/2 SETTINGS frame has frame type `0x04` at byte offset 3 (the 4th byte of the frame header). If `buf[3] == 0x04` and at least 9 bytes were received, the port is identified as `GRPC_SERVICE`.
+
+This pattern matches xray's HandlerService, sing-box's gRPC API, and any other gRPC server running on localhost.
+
+## AuthProbe — extended SOCKS5 analysis
+
+`AuthProbe.probe(port)` runs four sequential phases on a single port:
+
+<Steps>
+  <Step title="Method enumeration">
+    Offers three methods simultaneously: `0x00` (no auth), `0x01` (GSSAPI), `0x02` (username/password). Records which method the server selects as `selectedMethod`.
+
+    ```
+    Client: 05 03 00 01 02   (VER NMETHODS m0 m1 m2)
+    ```
+  </Step>
+  <Step title="Credential brute-force">
+    If `authRequired == true`, tries eight common credential pairs via RFC 1929 sub-negotiation:
+
+    | Username | Password |
+    |----------|----------|
+    | *(empty)* | *(empty)* |
+    | `admin` | `admin` |
+    | `user` | `password` |
+    | `proxy` | `proxy` |
+    | `1` | `1` |
+    | `test` | `test` |
+    | `123` | `123` |
+    | `socks` | `socks` |
+
+    The RFC 1929 auth frame structure:
+
+    ```
+    01 [ulen] [user bytes] [plen] [pass bytes]
+    │   └──── length of username (1 byte)
+    └──── VER = 1 (sub-negotiation version)
+
+    Server: 01 [status]
+                └──── 0x00 = success, non-zero = failure
+    ```
+  </Step>
+  <Step title="UDP ASSOCIATE bypass test">
+    If the proxy accepts no-auth, a UDP ASSOCIATE command (`CMD = 0x03`) is sent to verify whether the server opens a UDP relay. Per RFC 1928 Section 7, UDP relay packets carry no per-packet authentication — any process that knows the relay port can send UDP datagrams through the proxy without credentials.
+
+    ```
+    05 03 00 01 00 00 00 00 00 00
+    │  │  │  │  └──────────────── 0.0.0.0:0 (request relay on any port)
+    │  │  │  └─────────────────── ATYP = IPv4
+    │  │  └────────────────────── RSV = 0
+    │  └───────────────────────── CMD = UDP_ASSOCIATE (0x03)
+    └──────────────────────────── VER = 5
+    ```
+
+    `udpBypassPossible = true` when the response status byte is `0x00` and a non-zero relay port is returned.
+  </Step>
+  <Step title="Raw socket sniff demonstration">
+    Attempts to read `/proc/net/tcp` for the target port and tries to bind a UDP socket on the same port to intercept traffic. This phase always concludes that interception is blocked:
+
+    - Raw sockets require `CAP_NET_RAW`, which no unprivileged Android app holds.
+    - `/proc/net/tcp` shows port metadata (local address, state, UID) but never payload data.
+    - Binding UDP to an already-used port fails with `BindException`.
+
+    The `SniffAttempt.conclusion` field records the result for display.
+  </Step>
+</Steps>
+
+## AuthProbeResult data class
+
+```kotlin
+data class AuthProbeResult(
+    val port: Int,
+    val supportsNoAuth: Boolean,
+    val supportsPassword: Boolean,
+    val authRequired: Boolean,
+    val selectedMethod: Int,        // raw byte value
+    val bruteForceSuccess: Boolean?,
+    val bruteForceCredentials: String?,  // "user:pass" or null
+    val udpBypassPossible: Boolean,
+    val sniffAttempt: SniffAttempt?
+) {
+    val methodName: String  // "NO AUTH (0x00)", "PASSWORD (0x02)", etc.
+}
+
+data class SniffAttempt(
+    val rawSocketBlocked: Boolean,
+    val procNetTcpVisible: Boolean,
+    val procNetTcpData: String?,
+    val udpSniffResult: String,
+    val conclusion: String
+)
+```

@@ -1,0 +1,113 @@
+---
+title: "v2rayNG SOCKS5 vulnerability and detection"
+description: "v2rayNG exposes an unauthenticated SOCKS5 proxy on 127.0.0.1:10808 by default, allowing any app to resolve your VPN server's real IP address."
+---
+
+v2rayNG (`com.v2ray.ang`) is one of the most widely used xray-core clients on Android. By default it starts a local SOCKS5 inbound on `127.0.0.1:10808` alongside an HTTP proxy on port 10809 and the xray Stats API on port 19085. No authentication is required for the SOCKS5 or HTTP inbounds. Any app on the device can connect and use the proxy without any credentials.
+
+## Exposure summary
+
+| Property | Value |
+|---|---|
+| Package name | `com.v2ray.ang` |
+| Core | xray-core |
+| SOCKS5 port | 10808 |
+| HTTP proxy port | 10809 |
+| xray Stats API / gRPC | 19085 |
+| Auth by default | None |
+| Status | Vulnerable |
+
+## Why the port is open
+
+v2rayNG enables a local SOCKS5 inbound by default to support per-app routing (split tunneling). Apps that are excluded from the VPN tunnel route their traffic through this proxy instead. The inbound is documented in v2rayNG settings as "SOCKS" and "HTTP" listeners and is active whenever the VPN service is running. The design assumes that localhost is a trusted boundary — an assumption that does not hold on Android, where any installed app can reach `127.0.0.1`.
+
+## The three exposed ports
+
+<AccordionGroup>
+  <Accordion title="Port 10808 — SOCKS5 proxy (primary leak surface)">
+    The main exposure. xray-core listens here for SOCKS5 connections with no username/password requirement. The no-auth handshake completes in a single round trip, and any destination reachable through the VPN tunnel is then accessible to the caller.
+
+    RFC 1928 no-auth handshake:
+    ```
+    Client → \x05\x01\x00        (version 5, 1 method offered: no-auth)
+    Server ← \x05\x00            (version 5, selected method: no-auth)
+    ```
+
+    After this exchange the proxy accepts a `CONNECT` or `UDP ASSOCIATE` command to any destination.
+  </Accordion>
+  <Accordion title="Port 10809 — HTTP proxy">
+    An HTTP CONNECT proxy running on the same localhost address. Any app that supports an HTTP proxy can use this port to tunnel arbitrary TCP connections through the VPN. ProcNetScanner treats the presence of both 10808 and 10809 as a 85% confidence signal for v2rayNG; adding 19085 raises confidence to 95%.
+  </Accordion>
+  <Accordion title="Port 19085 — xray Stats API / gRPC">
+    xray-core's built-in statistics and management gRPC service. YourVPNDead's `XrayAPIDetector` identifies this port by sending an HTTP/2 connection preface followed by an empty SETTINGS frame. A valid HTTP/2 SETTINGS response confirms the xray gRPC service is present. While this port does not expose a SOCKS5 proxy, it provides runtime statistics and may expose configuration details depending on the xray build. See the [Happ page](/clients/happ-critical) for a more severe instance of this gRPC exposure.
+  </Accordion>
+</AccordionGroup>
+
+## ProcNetScanner fingerprint
+
+`ProcNetScanner.identifyVpnClient()` identifies v2rayNG by looking for port 10808 in `/proc/net/tcp` or `/proc/net/tcp6`. Confidence increases when additional ports are present:
+
+```kotlin
+if (10808 in portNumbers) {
+    val confidence = when {
+        10809 in portNumbers && 19085 in portNumbers -> 95
+        10809 in portNumbers -> 85
+        else -> 70
+    }
+    // name = "xray-core (v2rayNG / v2RayTun)"
+}
+```
+
+The `CLIENT_SIGNATURES` map in `ProcNetScanner` labels these ports as:
+
+- `10808` → `"v2rayNG / v2RayTun / XrayFluent (xray SOCKS5)"`
+- `10809` → `"v2rayNG / XrayFluent (xray HTTP)"`
+- `19085` → `"xray Stats API"`
+
+## How YourVPNDead detects the exposure
+
+<Steps>
+  <Step title="ProcNetScanner reads /proc/net/tcp">
+    The scanner opens `/proc/net/tcp` and `/proc/net/tcp6`, reads each line, and decodes the local address field from little-endian hex. Lines in state `0A` (LISTEN) bound to `0100007F` (127.0.0.1) on port `0x2A38` (10808) are flagged. No root is required.
+  </Step>
+  <Step title="PortScanner confirms with TCP connect">
+    A TCP connect to `127.0.0.1:10808` confirms the port is reachable. The scan covers both IPv4 and IPv6 loopback (`::1`) because some xray builds bind to the IPv6 address only.
+  </Step>
+  <Step title="Socks5Probe completes the handshake">
+    YourVPNDead sends `\x05\x01\x00` and reads the server's two-byte response. Receiving `\x05\x00` proves no authentication is required. The probe also tests `\x05\x02` (username/password) availability and attempts a `UDP ASSOCIATE` command to check whether the no-auth restriction applies to UDP as well (RFC 1928 Section 7).
+  </Step>
+  <Step title="ExitIPResolver resolves the VPN server IP">
+    Through the confirmed unauthenticated SOCKS5 proxy on port 10808, YourVPNDead issues:
+    ```
+    CONNECT api.ipify.org:80
+    GET / HTTP/1.1
+    Host: api.ipify.org
+    ```
+    The response contains the public exit IP of the VPN server. This IP is then geolocated via ip-api.com to produce country, city, ISP, and AS details.
+  </Step>
+</Steps>
+
+## What YourVPNDead shows when v2rayNG is running
+
+When v2rayNG is active, the scan results include:
+
+- **ProcNetScanner**: ports 10808, 10809, and 19085 flagged as listening on localhost; client identified as `xray-core (v2rayNG / v2RayTun)` with up to 95% confidence
+- **Socks5Probe**: `NO_AUTH` accepted on 10808; `HTTP CONNECT` accepted on 10809
+- **XrayAPIDetector**: gRPC service confirmed on 19085
+- **ExitIPResolver**: VPN server's public IP, country, ISP, and AS number
+
+## Mitigation
+
+<Warning>
+Mitigation requires changing v2rayNG settings. Simply closing the app may not stop the VPN service and proxy.
+</Warning>
+
+Two options are available:
+
+**Option 1 — Disable the SOCKS5 inbound.** In v2rayNG settings, set the SOCKS port to `0` or leave the field empty. This disables the local SOCKS5 listener entirely. Per-app split routing will stop working.
+
+**Option 2 — Enable authentication.** v2rayNG supports username/password authentication on the local SOCKS5 inbound. Set a non-empty username and password in the settings. The `Socks5Probe` handshake will then receive `\x05\xFF` (no acceptable method) and the proxy cannot be used without credentials.
+
+<Note>
+The HTTP proxy on port 10809 has its own setting and must be disabled or secured separately.
+</Note>

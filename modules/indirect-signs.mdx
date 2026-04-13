@@ -1,0 +1,132 @@
+---
+title: "Indirect VPN detection with IndirectSignsChecker"
+description: "IndirectSignsChecker identifies VPN use through MTU anomalies, DNS private-subnet addresses, NET_CAPABILITY_NOT_VPN, and dumpsys probing."
+---
+
+`IndirectSignsChecker` looks for anomalies that are characteristic of VPN use but are not definitive on their own — hence "indirect". Each check requires interpretation: the same signal can have an innocent explanation (a local DNS resolver, a managed corporate network, etc.). Used alongside `DirectSignsChecker`, the indirect checks significantly raise detection confidence. Call `fullCheck()` to run all four sub-checks synchronously on the calling thread.
+
+## Checks overview
+
+| Check | Method | Signal type |
+|-------|--------|-------------|
+| `NET_CAPABILITY_NOT_VPN` | `checkNotVpnCapability()` | Capability absence |
+| MTU anomaly | `checkMtu()` | Interface MTU below 1500 |
+| DNS private subnet | `checkDns()` | DNS server in RFC 1918 range |
+| `dumpsys` probing | `checkDumpsys()` | VPN service info leak |
+
+## Check details
+
+### 1. NET_CAPABILITY_NOT_VPN (`checkNotVpnCapability`)
+
+Android automatically adds `NET_CAPABILITY_NOT_VPN` to every network that is **not** a VPN. When the active network is a VPN, this capability is absent. The check is therefore inverted: absence of the capability is the detection signal.
+
+```kotlin
+val hasNotVpn = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+// detected = !hasNotVpn
+```
+
+API level: `NET_CAPABILITY_NOT_VPN` is available from API 21. This check is more reliable than `TRANSPORT_VPN` for some VPN implementations that do not set the transport flag explicitly.
+
+### 2. MTU anomaly (`checkMtu`)
+
+Standard Ethernet and Wi-Fi links use an MTU of 1500 bytes. VPN encapsulation adds overhead, which lowers the effective MTU of the tunnel interface. `NetworkInterface.getMTU()` (available since API 1) is called for every non-loopback interface that is currently up.
+
+Any MTU in the range 1200–1499 is flagged as `isAnomaly = true`.
+
+<Note>
+An anomalous MTU on `tun0` or `wg0` is a strong corroborating signal. An anomalous MTU on `wlan0` alone is weaker — some routers advertise a lower MTU for PPPoE or VLAN reasons.
+</Note>
+
+#### MTU by VPN protocol
+
+| Protocol | Typical MTU | Encapsulation overhead |
+|----------|-------------|------------------------|
+| Standard Ethernet / Wi-Fi | 1500 | — |
+| WireGuard | 1420 | ~80 bytes (UDP + WireGuard header) |
+| OpenVPN (UDP) | 1400 | ~100 bytes |
+| IPSec / IKEv2 | 1400–1438 | 62–100 bytes |
+| VLESS / Trojan (xray) | 1380–1400 | ~100–120 bytes |
+| Double encapsulation | 1200–1379 | 120+ bytes |
+
+The `details` field in `MtuInterface` maps the observed MTU to one of these categories for display in the UI.
+
+### 3. DNS private subnet (`checkDns`)
+
+`ConnectivityManager.getLinkProperties(activeNetwork).dnsServers` returns the DNS servers currently assigned to the active network (API 21+). If any server address falls within an RFC 1918 or RFC 6598 private range, the VPN client may be routing DNS queries through an internal resolver inside the tunnel.
+
+Private prefixes checked:
+
+- `10.` (RFC 1918 Class A)
+- `172.16.` – `172.31.` (RFC 1918 Class B)
+- `192.168.` (RFC 1918 Class C)
+- `100.64.` – `100.71.` (RFC 6598 CGN — commonly used by WireGuard/Tailscale mesh)
+
+On Android 9+, `linkProps.privateDnsServerName` is also read to capture the configured private DNS hostname.
+
+<Tip>
+A `192.168.x.x` or `10.x.x.x` DNS server on a mobile data connection (rmnet) is particularly suspicious — carrier networks use public DNS by default. On Wi-Fi, local resolvers like Pi-hole are a common benign cause.
+</Tip>
+
+### 4. dumpsys probing (`checkDumpsys`)
+
+`dumpsys` is Android's built-in diagnostic command. Standard apps do not have shell access, so both commands below are expected to fail with `Permission Denial` on unrooted devices. The check runs them anyway and records the result:
+
+```
+dumpsys vpn_management
+dumpsys activity services VpnService
+```
+
+`tryDumpsys()` captures stdout (up to 2000 chars) and stderr (up to 500 chars), waits for exit, and returns a `Triple<Boolean, String?, String?>` — `(accessible, output, errorMessage)`.
+
+<Warning>
+If either command returns non-empty output without a `Permission Denial` string, the device is running a custom ROM or has been rooted. The output may contain VPN profile names, server addresses, and connection state.
+</Warning>
+
+## Data classes
+
+```kotlin
+data class IndirectSignsResult(
+    val notVpnCapability: NotVpnCapabilityResult,
+    val mtuCheck: MtuCheckResult,
+    val dnsCheck: DnsCheckResult,
+    val dumpsysCheck: DumpsysCheckResult
+)
+
+data class NotVpnCapabilityResult(
+    val hasNotVpnCapability: Boolean,
+    val allCapabilities: String,
+    val detected: Boolean,
+    val error: String?
+)
+
+data class MtuInterface(
+    val name: String,
+    val mtu: Int,
+    val isAnomaly: Boolean,
+    val expectedMtu: Int,   // always 1500
+    val details: String
+)
+
+data class MtuCheckResult(
+    val interfaces: List<MtuInterface>,
+    val anomalyDetected: Boolean,
+    val error: String?
+)
+
+data class DnsCheckResult(
+    val dnsServers: List<String>,
+    val privateSubnetDns: List<String>,
+    val privateDnsServerName: String?,
+    val detected: Boolean,
+    val error: String?
+)
+
+data class DumpsysCheckResult(
+    val vpnManagementAccessible: Boolean,
+    val vpnManagementOutput: String?,
+    val vpnServiceAccessible: Boolean,
+    val vpnServiceOutput: String?,
+    val vpnManagementError: String?,
+    val vpnServiceError: String?
+)
+```

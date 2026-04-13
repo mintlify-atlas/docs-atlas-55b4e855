@@ -1,97 +1,69 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "YourVPNDead: See What Your VPN Leaks on Android"
+description: "YourVPNDead is an Android app that reveals what any app can detect about your VPN — server IPs, client identity, and open proxies — without root."
 ---
 
-## Setting up
+YourVPNDead is a self-check tool for Android that shows you exactly what information a malicious or surveillance app could collect about your VPN without any special permissions or root access. In under one second, it can identify your VPN client, expose open SOCKS5 proxies on localhost, and reveal the real IP address of your VPN server — the same techniques used by tracking SDKs, banking apps, and government-mandated software.
 
-Get your documentation site up and running in minutes.
+<Warning>
+  This app is a **transparency and education tool**. All scanning is purely local — no data leaves your device. Use it to understand your exposure and harden your setup.
+</Warning>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first scan in under a minute and understand the results.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="mobile" href="/installation">
+    Download the APK and install it on your Android device.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="How It Works" icon="magnifying-glass" href="/how-it-works/architecture">
+    Explore the 14-phase scan orchestrator and detection pipeline.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Vulnerable Clients" icon="shield-exclamation" href="/clients/overview">
+    See which VPN clients are exposed and why Happ is critically dangerous.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What YourVPNDead detects
 
-Everything you need to create world-class documentation.
+YourVPNDead runs a 14-phase scan entirely on your device, combining multiple detection techniques to build a complete picture of your VPN exposure:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Direct VPN signs" icon="eye" href="/modules/direct-signs">
+    NetworkCapabilities flags, system proxy variables, installed VPN apps, TUN interfaces, and routing table analysis.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Indirect VPN signs" icon="chart-line" href="/modules/indirect-signs">
+    MTU anomaly detection, DNS private-subnet checks, NET_CAPABILITY_NOT_VPN, and dumpsys probing.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Port scanner" icon="network-wired" href="/modules/port-scanner">
+    Scans 127.0.0.1 and ::1 for open proxy ports — 40+ known ports in quick mode, all 65535 in full mode.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="SOCKS5 probe" icon="plug" href="/modules/socks5-probe">
+    Identifies proxy type (SOCKS5 no-auth, auth-required, HTTP CONNECT, gRPC), attempts brute-force of weak credentials.
   </Card>
-</Columns>
+  <Card title="Clash REST API" icon="globe" href="/modules/clash-api">
+    Detects unauthenticated Clash/mihomo API on localhost, extracting active connections and destination IPs.
+  </Card>
+  <Card title="Exit IP resolver" icon="location-dot" href="/modules/exit-ip">
+    Tunnels through an open SOCKS5 proxy to fetch your VPN server's real public IP with geolocation.
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Why this matters
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Popular VPN clients for VLESS/xray/sing-box — including v2rayNG, NekoBox, and Hiddify — create an unauthenticated SOCKS5 proxy on localhost by default. Any app on your device can connect to this proxy and route traffic through your VPN tunnel, effectively learning your VPN server's IP address. This has been an active vector for tracking since at least 2017 (Yandex.Metrica) and is now documented in official detection guidelines from Russian government agencies.
+
+<Steps>
+  <Step title="Install the APK">
+    Download the latest release from [GitHub Releases](https://github.com/loop-uh/yourvpndead/releases) and install it on your Android device.
+  </Step>
+  <Step title="Run a quick scan">
+    Open YourVPNDead with your VPN active and tap **Quick Scan**. Results appear within seconds.
+  </Step>
+  <Step title="Review findings">
+    The app presents findings by severity — Critical, Warning, Info, and Safe — with detailed explanations of each detection.
+  </Step>
+  <Step title="Take action">
+    Use the [protection guide](/protection/how-to-protect) to close vulnerabilities based on what the scan finds.
+  </Step>
+</Steps>

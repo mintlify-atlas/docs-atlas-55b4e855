@@ -1,80 +1,73 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: run your first VPN exposure scan in minutes"
+description: "Get YourVPNDead installed and run a quick scan to discover open SOCKS5 proxies and VPN server IP leaks on your Android device in under a minute."
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+YourVPNDead requires no root, no special configuration, and no pairing with a desktop. Once the APK is sideloaded, a Quick Scan over the 40+ most common VPN client ports completes in a few seconds and immediately tells you whether your VPN client is exposing an unauthenticated proxy on localhost.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  The app has been verified against the following VPN clients: v2rayNG (`com.v2ray.ang`), NekoBox (`moe.nb4a`), sing-box SFA (`io.nekohasekai.sfa`), Hiddify (`app.hiddify.com`), HAPP (`com.happproxy`), Karing, Throne, and Amnezia VPN (`org.amnezia.vpn`). Other clients are detected through port fingerprinting and `/proc/net/tcp` analysis. See [vulnerable clients](/clients/overview) for the full list.
 </Note>
+
+## Steps
+
+<Steps>
+  <Step title="Install the APK">
+    Download the latest APK from the [GitHub Releases page](https://github.com/loop-uh/yourvpndead/releases) and sideload it. If you have not done this before, see the [installation guide](/installation) for step-by-step instructions on enabling "Install from unknown sources" and verifying the file.
+  </Step>
+
+  <Step title="Start your VPN client">
+    Open your VPN client (v2rayNG, NekoBox, Hiddify, or another) and connect to a server as you normally would. The scan only makes sense while a VPN is active — without one, the app will report no proxy ports open and no VPN transport detected, which is the expected safe result.
+  </Step>
+
+  <Step title="Open YourVPNDead and tap Quick Scan">
+    Launch YourVPNDead. On the main screen you will see two buttons: **Quick Scan** and **Full Scan**. Tap **Quick Scan**. The scan probes 40+ known VPN client ports on `127.0.0.1` and `::1` (some clients bind only to the IPv6 loopback). A progress bar shows which phase is running — there are 14 phases in total, from profile detection through geolocation.
+
+    **Quick Scan** checks the following known ports, among others:
+
+    ```
+    xray-core:      10808, 10809, 10810, 1080, 1081
+    sing-box:       2080, 2081, 3066, 3067
+    mihomo/Clash:   7890, 7891, 7892, 7893, 10801
+    xray API:       10085, 19085, 23456, 8001, 62789
+    Tor / general:  9050, 9051, 9150, 1080
+    HTTP proxies:   8080, 8081, 8888, 3128
+    Yandex.Metrica: 29009, 29010, 30102, 30103
+    Meta Pixel:     12387–12591
+    ```
+
+    **Full Scan** probes all 65 535 ports using 200 parallel coroutines. Use it when Quick Scan finds nothing but you suspect a client is listening on a non-standard port.
+  </Step>
+
+  <Step title="Read the findings">
+    When the scan finishes, the screen shows a summary card followed by individual findings. Each finding has a severity level:
+
+    | Severity | Meaning |
+    |---|---|
+    | **CRITICAL** | An unauthenticated proxy or open API was found; your VPN server IP can be retrieved right now by any app on your device |
+    | **WARNING** | A VPN-related indicator was detected (installed client, VPN interface, MTU anomaly, system proxy variable) but no direct IP leak was confirmed |
+    | **INFO** | Informational only — VPN is active, `/proc/net/tcp` shows listening ports, etc. |
+    | **SAFE** | The specific check passed; no issue found |
+
+    A typical CRITICAL finding for v2rayNG looks like this:
+
+    ```
+    CRITICAL — SOCKS5 (no auth) on port 10808
+    ----------------------------------------
+    SOCKS5 handshake completed without authentication (RFC 1928, method 0x00).
+    Exit IP retrieved via this proxy: 198.51.100.42
+    Country: Netherlands, Amsterdam — AS12345 ExampleVPN Ltd
+    Hosting: Yes
+    ```
+
+    The exit IP shown is the address of your VPN server — the same value that Roskomnadzor or any app with `INTERNET` permission could obtain without your knowledge.
+  </Step>
+
+  <Step title="Share or act on the report">
+    After a scan completes, a share icon appears in the top bar. Tap it to export a plain-text report via any Android share target (messaging apps, email, clipboard). Use this to report the issue to your VPN client's developers or to document your exposure level. For guidance on reducing exposure, see [how to protect yourself](/protection/how-to-protect).
+  </Step>
+</Steps>
+
+## What a "no issues found" result means
+
+If the scan returns no CRITICAL findings, it means none of the tested ports responded with an unauthenticated SOCKS5 handshake and no exit IP was retrieved. It does not mean your VPN is invisible — `TRANSPORT_VPN`, installed app detection, MTU anomalies, and routing table entries will still be visible to any app, regardless of proxy authentication. Full invisibility is not possible on a non-rooted Android device.

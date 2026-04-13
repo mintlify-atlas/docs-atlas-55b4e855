@@ -1,0 +1,92 @@
+{
+  "projectType": "saas",
+  "projectName": "YourVPNDead",
+  "projectDescription": "An Android app that detects and exposes VPN server IPs via local SOCKS5 vulnerabilities in VLESS/xray/sing-box clients, demonstrating what any app on your device can see without root or special permissions.",
+  "theme": "aspen",
+  "primaryColor": "#E53935",
+  "lightColor": "#FFCDD2",
+  "darkColor": "#B71C1C",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "How It Works",
+            "pages": [
+              "how-it-works/architecture",
+              "how-it-works/detection-methods",
+              "how-it-works/vulnerability-explained"
+            ]
+          },
+          {
+            "group": "Scan Modules",
+            "pages": [
+              "modules/direct-signs",
+              "modules/indirect-signs",
+              "modules/port-scanner",
+              "modules/socks5-probe",
+              "modules/clash-api",
+              "modules/xray-api",
+              "modules/exit-ip"
+            ]
+          },
+          {
+            "group": "Vulnerable Clients",
+            "pages": [
+              "clients/overview",
+              "clients/v2rayng",
+              "clients/nekobox-hiddify",
+              "clients/happ-critical"
+            ]
+          },
+          {
+            "group": "Protection & FAQ",
+            "pages": [
+              "protection/how-to-protect",
+              "protection/faq",
+              "protection/references"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "14-phase scan orchestrator running fully on-device without root",
+    "SOCKS5 unauthenticated proxy detection exposing VPN server exit IPs",
+    "Clash REST API leak detection revealing all active connections and server IPs",
+    "xray gRPC API detection allowing config and key dump",
+    "/proc/net/tcp fingerprinting to identify VPN client by listening port patterns",
+    "MTU anomaly and DNS private-subnet detection as indirect VPN signals",
+    "VPN client identification across 19 known packages (v2rayNG, NekoBox, Hiddify, etc.)",
+    "IP geolocation of discovered VPN server addresses",
+    "Work Profile and Samsung Knox isolation bypass awareness",
+    "Split tunnel detection via direct vs proxy IP comparison"
+  ],
+  "publicApiSurface": [
+    "ScanOrchestrator.quickScan(onPhase, onProgress): ScanResult",
+    "ScanOrchestrator.fullScan(onPhase, onProgress): ScanResult",
+    "DirectSignsChecker.fullCheck(): DirectSignsResult",
+    "IndirectSignsChecker.fullCheck(): IndirectSignsResult",
+    "PortScanner.scanKnownPorts(): List<OpenPort>",
+    "PortScanner.scanFullRange(): List<OpenPort>",
+    "Socks5Probe.probe(port): ProxyInfo",
+    "ClashAPIProbe.probe(): ClashAPIResult?",
+    "XrayAPIDetector.detect(): XrayAPIInfo?",
+    "ExitIPResolver.resolve(port): ExitIPInfo?",
+    "ProcNetScanner.scanListeningPorts(): List<ListeningPort>",
+    "ProcNetScanner.identifyVpnClient(ports): List<VpnClientGuess>",
+    "GeoLocator.locate(ip): GeoInfo?",
+    "ProfileDetector.detect(): ProfileInfo",
+    "AuthProbe.probe(port): AuthProbeResult"
+  ]
+}

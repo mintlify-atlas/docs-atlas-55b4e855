@@ -1,0 +1,84 @@
+---
+title: "Android VPN clients vulnerable to SOCKS5 proxy exposure"
+description: "Ten VPN clients are tested by YourVPNDead. Most expose an unauthenticated SOCKS5 proxy on localhost. Happ is critically vulnerable and should be removed."
+---
+
+YourVPNDead tests ten Android VPN clients for a specific class of exposure: an unauthenticated SOCKS5 proxy bound to `127.0.0.1`. When such a proxy is running, any app on the device — without root, without special permissions, using only standard Android APIs — can route traffic through your VPN tunnel and resolve your VPN server's real IP address in under one second.
+
+## What "vulnerable" means
+
+A vulnerable client starts a SOCKS5 inbound listener on localhost by default and requires no username or password. The RFC 1928 no-auth handshake (`\x05\x01\x00` → `\x05\x00`) succeeds immediately. Any co-installed app, advertising SDK, or browser script can then issue a `CONNECT api.ipify.org` command through that proxy and receive the exit IP of your VPN server — revealing the server's location, ISP, and AS number.
+
+## What "protected" means
+
+A protected client either disables the local SOCKS5 inbound entirely (Clash/mihomo sets `socks-port: 0` by default) or requires authentication before accepting connections (Husi enables username/password auth). Shadowrocket runs on iOS, where the Android loopback scanning surface does not apply.
+
+## Client vulnerability table
+
+| Client | Core | Port | Auth by default | Status |
+|---|---|---|---|---|
+| **v2rayNG** | xray | 10808 | No | Vulnerable |
+| **NekoBox** | sing-box | 2080 | No | Vulnerable |
+| **Hiddify** | sing-box / xray | — | No | Vulnerable |
+| **v2RayTun** | xray | — | No | Vulnerable |
+| **Happ** | xray | — | No + gRPC API | **Critically vulnerable — remove immediately** |
+| **Karing** | sing-box | 3066 + 3067 | No | Vulnerable |
+| **Throne** | sing-box | 2080 | No | Vulnerable |
+| **Husi** | sing-box | — | Yes | Protected (auth enabled) |
+| **Clash / mihomo** | mihomo | disabled | N/A | Safe (SOCKS port off) |
+| **Shadowrocket** | — | — | Yes | Protected (iOS) |
+
+## Clients by category
+
+<CardGroup cols={3}>
+  <Card title="Critically vulnerable" icon="triangle-exclamation" color="#dc2626" href="/clients/happ-critical">
+    **Happ** (`com.happproxy`) — xray-core with both an unauthenticated SOCKS5 proxy and an exposed gRPC HandlerService that allows dumping the full configuration including VLESS UUIDs and server addresses.
+  </Card>
+  <Card title="Vulnerable" icon="circle-exclamation" color="#ea580c" href="/clients/v2rayng">
+    **v2rayNG** (`com.v2ray.ang`), **NekoBox** (`moe.nb4a`), **Hiddify** (`app.hiddify.com`), **v2RayTun** (`io.github.saeeddev94.xray`), **Karing** (package unknown), **Throne** (package unknown) — all expose unauthenticated SOCKS5 proxies on localhost.
+  </Card>
+  <Card title="Protected / Safe" icon="shield-check" color="#16a34a">
+    **Husi** (`io.nekohasekai.sfa`) — sing-box with authentication enabled. **Clash / mihomo** (`com.github.metacubex.clash.meta`) — SOCKS port disabled by default. **Shadowrocket** — iOS only.
+  </Card>
+</CardGroup>
+
+## Detection methods
+
+YourVPNDead uses four complementary techniques to confirm exposure:
+
+<AccordionGroup>
+  <Accordion title="ProcNetScanner — /proc/net/tcp fingerprinting">
+    Parses `/proc/net/tcp` and `/proc/net/tcp6` without root to find listening ports on `127.0.0.1`. Port combinations identify the specific client: `10808 + 10809 + 19085` = v2rayNG / XrayFluent; `2080` = NekoBox / Throne; `3066 + 3067` = Karing; `7890 + 7891 + 9090` = Clash / mihomo.
+  </Accordion>
+  <Accordion title="PortScanner — TCP connect scan">
+    Connects to 40+ known VPN-client ports on both `127.0.0.1` and `::1`. Some clients bind only to the IPv6 loopback address. A successful TCP connect confirms the port is open regardless of `/proc/net/tcp` visibility.
+  </Accordion>
+  <Accordion title="Socks5Probe — protocol handshake">
+    Sends the RFC 1928 greeting `\x05\x01\x00` (one method: no authentication) and reads the server's response. `\x05\x00` confirms no-auth SOCKS5 is accepted. `\x05\xFF` means no acceptable method — authentication is required.
+  </Accordion>
+  <Accordion title="ExitIPResolver — server IP leak confirmation">
+    Routes a `CONNECT api.ipify.org` request through the unauthenticated SOCKS5 proxy, then geolocates the returned IP via ip-api.com. This produces the VPN server's country, city, ISP, and AS number — confirming the full extent of the leak.
+  </Accordion>
+</AccordionGroup>
+
+## Installed package detection
+
+`DirectSignsChecker` queries `PackageManager` for each known VPN client package. On Android 11 and above, the `QUERY_ALL_PACKAGES` permission (declared in `AndroidManifest.xml`) and `<queries>` entries are required. YourVPNDead declares queries for all clients listed in the table:
+
+```xml
+<package android:name="com.v2ray.ang" />
+<package android:name="io.nekohasekai.sfa" />
+<package android:name="app.hiddify.com" />
+<package android:name="com.github.metacubex.clash.meta" />
+<package android:name="com.happproxy" />
+<package android:name="io.github.saeeddev94.xray" />
+<package android:name="moe.nb4a" />
+```
+
+Detection of a package does not by itself confirm a proxy is running — the SOCKS5 probe is required to confirm active exposure.
+
+## Further reading
+
+- [v2rayNG SOCKS5 vulnerability and detection](/clients/v2rayng)
+- [NekoBox and Hiddify: sing-box SOCKS5 exposure](/clients/nekobox-hiddify)
+- [Happ: critically vulnerable — remove immediately](/clients/happ-critical)

@@ -1,0 +1,54 @@
+---
+title: "YourVPNDead: Android VPN exposure self-check tool"
+description: "YourVPNDead shows what any app on your Android device can learn about your VPN without root — server IPs, open proxies, and client identity."
+---
+
+YourVPNDead is an Android self-check tool that demonstrates exactly what a hostile app — a banking app, a government services app, or any SDK with network access — can learn about your VPN without root and without special permissions. The scan runs entirely on-device using only standard Android APIs, and discovering your VPN server's IP takes under one second.
+
+<Warning>
+  YourVPNDead is an educational tool. It does not modify your device, does not block traffic, and does not send any data to external servers. All results are displayed locally and are visible only to you.
+</Warning>
+
+## Why this matters
+
+Between 2024 and 2026, Roskomnadzor (Russia's federal communications regulator) and Mintsifry (the Ministry of Digital Development) have been actively developing methods to detect VPN usage on end-user devices. Mintsifry's published methodology describes checks that can be performed by any app with device access — including banking apps, government service apps (`Gosuslugi`), and marketplace apps that bundle mandatory SDKs.
+
+The threat is not hypothetical. Yandex.Metrica has sent HTTP requests to `localhost` since 2017. Meta Pixel uses WebRTC STUN (SDP Munging) to scan `localhost`. These techniques are documented in peer-reviewed research presented at USENIX Security '26.
+
+The core vulnerability is structural: popular VPN clients — **v2rayNG**, **NekoBox**, and **Hiddify** — create an unauthenticated SOCKS5 proxy on `localhost` as part of their normal operation. Any app on your device can connect to that proxy and route a request through it to `api.ipify.org` or any other IP-echo service, instantly revealing the exit IP of your VPN server. YourVPNDead shows you this from your own perspective so you can take action before a third party does.
+
+## What the app detects
+
+The scanner runs 14 sequential phases. The table below describes the checks performed by `DirectSignsChecker` — the module that uses only local system APIs, with no network requests except the split-tunnel comparison.
+
+| Check | Android API / method | What it reveals |
+|---|---|---|
+| `TRANSPORT_VPN` | `NetworkCapabilities.hasTransport(TRANSPORT_VPN)` | Public VPN transport flag |
+| `IS_VPN` (hidden) | `caps.toString().contains("IS_VPN")` | Internal Android flag, not in the public API surface |
+| `VpnTransportInfo` | `caps.toString().contains("VpnTransportInfo")` | VPN transport class name |
+| HTTP proxy | `System.getProperty("http.proxyHost")` | System-wide HTTP proxy set by VPN client |
+| SOCKS proxy | `System.getProperty("socksProxyHost")` | System-wide SOCKS proxy set by VPN client |
+| Known ports | Comparison against a built-in database | Proxy on a well-known port (1080, 9050, 8080, …) |
+| Installed VPN apps | `PackageManager.getPackageInfo()` | 20 known VPN client package names |
+| VPN interfaces | `NetworkInterface.getNetworkInterfaces()` | `tun\d+`, `tap\d+`, `wg\d+`, `ppp\d+`, `ipsec.*` |
+| Routing table | `/proc/net/route` | Default route via a non-standard interface |
+| Split tunnel | Direct IP vs proxy IP comparison | Per-app split-tunnel bypass |
+
+Beyond direct signs, the app also runs indirect heuristics (`IndirectSignsChecker`): `NET_CAPABILITY_NOT_VPN`, MTU anomaly detection, DNS private-subnet checks, and `dumpsys` queries. The port scanner (`PortScanner`) probes `127.0.0.1` and `::1`, and `Socks5Probe` identifies whether each open port is an unauthenticated SOCKS5 proxy, an authenticated one, an HTTP CONNECT proxy, or a gRPC service. If a vulnerable proxy is found, `ExitIPResolver` tunnels a request through it to retrieve the VPN server's exit IP, which `GeoLocator` then resolves to a country, city, ISP, and AS number.
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the APK, run your first scan, and interpret the results in under a minute.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Requirements, sideloading steps, permissions explained, and build-from-source instructions.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/how-it-works/architecture">
+    How the 14-phase scan orchestrator works and what each module does.
+  </Card>
+  <Card title="Vulnerable clients" icon="shield-exclamation" href="/clients/overview">
+    Which VPN clients are affected, on which ports, and what authentication status they expose.
+  </Card>
+</CardGroup>

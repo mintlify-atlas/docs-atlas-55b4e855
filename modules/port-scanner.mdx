@@ -1,0 +1,149 @@
+---
+title: "Localhost port scanner — known ports and full range"
+description: "PortScanner checks 127.0.0.1 and ::1 for open proxy ports using TCP connect. Quick mode scans 40+ known ports; full mode scans all 65535."
+---
+
+`PortScanner` probes `127.0.0.1` (and `::1` as a fallback) for listening TCP services using non-blocking `Socket.connect()` calls. No special permissions are required — any app can attempt a TCP connection to localhost. Open ports are a direct indicator of a running proxy process; subsequent modules (`Socks5Probe`, `ClashAPIProbe`, `XrayAPIDetector`) then interrogate each open port to determine what service is listening.
+
+## How it works
+
+Each port probe opens a new `Socket`, calls `socket.connect(InetSocketAddress(host, port), timeoutMs)`, and records success or timeout. The response time in milliseconds is stored alongside the port number. IPv4 is tried first; if it fails, the same port is tried on IPv6 `::1`.
+
+```kotlin
+data class OpenPort(
+    val port: Int,
+    val responseMs: Long
+)
+```
+
+## Quick scan vs full scan
+
+<AccordionGroup>
+  <Accordion title="Quick scan — scanKnownPorts()">
+    Iterates the `KNOWN_PORTS` list sequentially with a 300 ms timeout per port. Completes in under one second. Use this as the default scan mode.
+
+    ```kotlin
+    suspend fun scanKnownPorts(
+        timeoutMs: Int = 300,
+        onProgress: (Float) -> Unit = {}
+    ): List<OpenPort>
+    ```
+  </Accordion>
+  <Accordion title="Full scan — scanFullRange()">
+    Scans all 65,535 ports using batched coroutines. The default `parallelism` of 200 means 200 ports are probed concurrently per batch, using a 50 ms timeout. On a typical Android device this completes in 3–5 seconds.
+
+    ```kotlin
+    suspend fun scanFullRange(
+        timeoutMs: Int = 50,
+        parallelism: Int = 200,
+        onProgress: (Float) -> Unit = {}
+    ): List<OpenPort>
+    ```
+
+    Results are sorted by port number before returning.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Use the quick scan first. Switch to the full range scan only when the quick scan finds nothing but indirect signs (MTU anomaly, VPN transport flag) still suggest a proxy is running on a non-standard port.
+</Tip>
+
+## Known port categories
+
+The `KNOWN_PORTS` list covers 40+ ports grouped by origin. All ports are tried in the quick scan.
+
+### xray-core clients
+
+Ports used by v2rayNG, v2RayTun, Hiddify, XrayFluent, and similar xray-based apps:
+
+| Port | Role |
+|------|------|
+| 10808 | SOCKS5 inbound (xray default) |
+| 10809 | HTTP inbound (xray default) |
+| 10810 | Mixed inbound |
+| 1080 | SOCKS5 generic / xray alternative |
+| 1081 | SOCKS5 alternative |
+
+### sing-box clients
+
+Ports used by NekoBox, Throne, Husi, SFA, and Karing:
+
+| Port | Role |
+|------|------|
+| 2080 | Mixed inbound (sing-box / NekoBox) |
+| 2081 | Mixed inbound alternative |
+| 3066 | HTTP/SOCKS5 full proxy (Karing) |
+| 3067 | SOCKS5 rule-based (Karing) |
+
+### mihomo / Clash clients
+
+Ports used by Clash, ClashMeta, mihomo, and compatible forks:
+
+| Port | Role |
+|------|------|
+| 7890 | HTTP proxy |
+| 7891 | SOCKS5 |
+| 7892 | Mixed |
+| 7893 | Mixed alternative |
+| 10801 | Mixed (mihomo) |
+
+### API ports
+
+| Port | Role |
+|------|------|
+| 10085 | xray Stats/gRPC API (default) |
+| 19085 | xray Stats/gRPC API (XrayFluent) |
+| 23456 | xray API alternative |
+| 8001 | xray API alternative |
+| 62789 | xray API (non-standard) |
+| 9090 | Clash / mihomo REST API |
+
+### Mintsifry methodology ports
+
+Ports listed in official Russian Ministry of Digital Development VPN-detection guidelines:
+
+| Port | Role |
+|------|------|
+| 9000 | SOCKS / v2ray |
+| 5555 | SOCKS |
+| 9050 | Tor SOCKS |
+| 9051 | Tor control |
+| 9150 | Tor Browser SOCKS |
+| 3128 | HTTP proxy (Squid) |
+| 8080 | HTTP proxy |
+| 8081 | HTTP proxy alternative |
+| 8888 | HTTP proxy alternative |
+
+### Yandex.Metrica tracking ports
+
+Yandex.Metrica binds to localhost for inter-process communication on some Android SDK versions. These ports are included to distinguish tracker sockets from VPN proxy sockets:
+
+| Port | Role |
+|------|------|
+| 29009 | Yandex.Metrica IPC |
+| 29010 | Yandex.Metrica IPC |
+| 30102 | Yandex.Metrica IPC |
+| 30103 | Yandex.Metrica IPC |
+
+### Meta Pixel tracking ports
+
+The Meta Pixel Android SDK opens localhost sockets for SDK-internal communication:
+
+| Ports | Role |
+|-------|------|
+| 12387–12591 (selected) | Meta Pixel / Facebook SDK IPC |
+
+Full list: 12387, 12388, 12580–12591.
+
+## IPv6 localhost scanning
+
+Every port is also probed on `::1` when the IPv4 attempt fails. Some VPN clients bind exclusively to the IPv6 loopback address, particularly sing-box configurations with `"listen": "::"`. The `probePort(HOST_V6, port, timeoutMs)` fallback ensures these are not missed.
+
+## When to use each mode
+
+| Situation | Recommended mode |
+|-----------|-----------------|
+| Routine scan, VPN client active | Quick scan (default) |
+| Quick scan finds nothing, but `TRANSPORT_VPN` is set | Full range scan |
+| Investigating an unknown app | Full range scan |
+| Background periodic check | Quick scan |

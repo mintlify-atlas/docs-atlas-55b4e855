@@ -1,0 +1,74 @@
+---
+title: "Sideload and install YourVPNDead APK on your Android"
+description: "Download and sideload the YourVPNDead APK on Android 7.0+. Requires INTERNET, ACCESS_NETWORK_STATE, and QUERY_ALL_PACKAGES permissions."
+---
+
+YourVPNDead is distributed as a standard Android APK. It is not published on the Google Play Store, so installation requires sideloading — enabling your device to install apps from outside the Play Store. No root access is required at any point.
+
+<Warning>
+  Sideloading requires enabling "Install from unknown sources" (or "Install unknown apps") in your device settings. Disable this setting again after installation if you do not need it for other apps.
+</Warning>
+
+## Requirements
+
+- Android 7.0 or later (API level 24+)
+- No root required
+- Approximately 5 MB of free storage for the APK
+
+## Install from GitHub Releases
+
+<Steps>
+  <Step title="Download the APK">
+    Open your Android browser and navigate to the [YourVPNDead Releases page](https://github.com/loop-uh/yourvpndead/releases). Tap the `.apk` asset under the latest release to download it. The APK is built automatically from the repository on every commit using the version scheme `0.<git-commit-count>.0`.
+  </Step>
+
+  <Step title="Allow installation from unknown sources">
+    On **Android 8.0 and later**: when you tap the downloaded APK, Android will prompt you to allow the specific browser or file manager you used to install unknown apps. Tap **Settings**, enable the toggle for that app, then tap the back arrow and proceed with installation.
+
+    On **Android 7.0**: go to **Settings → Security → Unknown sources** and enable the toggle before tapping the APK.
+  </Step>
+
+  <Step title="Install the APK">
+    Tap the downloaded file in your notification shade or in your Downloads folder. Tap **Install** on the confirmation screen. The app will appear as **YourVPNDead** in your app drawer.
+  </Step>
+
+  <Step title="Verify the installation">
+    Open YourVPNDead. The main screen should display two buttons — **Quick Scan** and **Full Scan** — with no errors. If Android displays a "Parse error" or "App not installed" message, the APK download was likely corrupted; delete it and download again.
+  </Step>
+</Steps>
+
+## Permissions explained
+
+YourVPNDead requests three permissions. The table below explains what each one is used for and why it is necessary. No data is ever sent to external servers — all scanning is local, and the scan report is displayed only on your device.
+
+| Permission | Purpose |
+|---|---|
+| `INTERNET` | Required to probe open ports by establishing TCP connections to `127.0.0.1` and `::1`, and to send a request through any discovered SOCKS5 proxy to retrieve the VPN server's exit IP via `api.ipify.org`. Also used to query `ip-api.com` for geolocation of the exit IP. |
+| `ACCESS_NETWORK_STATE` | Required to read `NetworkCapabilities` (VPN transport detection, `NET_CAPABILITY_NOT_VPN`), `LinkProperties` (DNS server list), and network interface metadata (MTU values). |
+| `QUERY_ALL_PACKAGES` | Required on Android 11 and later to call `PackageManager.getPackageInfo()` for the 20 known VPN client package names listed in the manifest `<queries>` block. Without this permission, Android 11+ silently hides packages from other apps. |
+
+<Info>
+  The manifest also declares `REQUEST_INSTALL_PACKAGES`. This permission is used only by the in-app updater, which downloads newer APK versions from GitHub Releases and prompts you to install them. It is not used during scanning.
+</Info>
+
+## Build from source
+
+If you prefer to compile the app yourself, you need the Android SDK (API 34) and JDK 17 or later.
+
+```bash
+git clone https://github.com/loop-uh/yourvpndead.git
+cd yourvpndead
+./gradlew assembleDebug
+```
+
+The signed debug APK will be written to:
+
+```
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+You can also open the project in Android Studio and run it directly on a connected device or emulator. The project uses Kotlin, Jetpack Compose, Material 3, and Kotlin Coroutines — no additional configuration beyond a standard Android SDK installation is required.
+
+<Tip>
+  The release build type is configured with the debug signing config (`signingConfig = signingConfigs.getByName("debug")`), so `assembleRelease` produces an installable APK without needing a keystore. Use `assembleDebug` for development builds and `assembleRelease` for a size-optimized version.
+</Tip>

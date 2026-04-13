@@ -1,0 +1,131 @@
+---
+title: "Frequently asked questions about VPN detection"
+description: "Common questions about what YourVPNDead detects, how the SOCKS5 leak works, privacy implications, and which VPN clients are safe to use."
+---
+
+YourVPNDead replicates the detection techniques that any app with `INTERNET` permission can perform against your VPN setup. These questions cover how the scanner works, what the results mean, and what you can do about specific findings.
+
+<AccordionGroup>
+  <Accordion title="Does YourVPNDead send any data to external servers?">
+    No personal data is sent anywhere. All scanning runs locally on your device.
+
+    The only external network calls are:
+
+    - **ExitIPResolver**: connects to `api.ipify.org` through the discovered SOCKS5 proxy on `127.0.0.1` to resolve the VPN server's exit IP — not your real IP.
+    - **GeoLocator**: sends the resolved exit IP to `ip-api.com` to retrieve country, city, ISP, ASN, and proxy/hosting flags.
+
+    Both calls are diagnostic — they resolve the VPN server's address, not anything that identifies you. The scan report is stored only on your device.
+  </Accordion>
+
+  <Accordion title="Do I need root to run YourVPNDead?">
+    No. Every detection method uses standard Android APIs available to any installed app:
+
+    - `NetworkCapabilities` and `LinkProperties` for VPN transport detection and MTU checks
+    - `NetworkInterface.getNetworkInterfaces()` for TUN/TAP/WireGuard interface enumeration
+    - `PackageManager` for installed VPN app detection
+    - `/proc/net/tcp` and `/proc/net/tcp6` for listening port fingerprinting — readable without root on most Android versions
+    - TCP socket connections to `127.0.0.1` for the port scanner and proxy probes
+
+    The only capability that requires root — raw socket sniffing — is tested and immediately reported as blocked. YourVPNDead includes this as a demonstration that traffic interception at the packet level is not possible without root.
+  </Accordion>
+
+  <Accordion title="Can a banking app or government app actually do this?">
+    Yes. Any app that holds the `INTERNET` permission — which nearly every app requests — can perform every check that YourVPNDead performs. This includes:
+
+    - TCP connections to `127.0.0.1` on any port
+    - Reading `NetworkCapabilities` via `ConnectivityManager`
+    - Calling `NetworkInterface.getNetworkInterfaces()`
+    - Resolving the system HTTP and SOCKS proxy properties
+
+    The [LocalMess research (USENIX Security 2026)](https://localmess.github.io/) documents that Yandex.Metrica has been sending HTTP requests to localhost since 2017, and that Meta Pixel uses WebRTC STUN SDP Munging for the same purpose. Mintsifry's 2024–2026 VPN detection methodology describes open-port, MTU, DNS, and interface checks that map directly to what YourVPNDead demonstrates.
+  </Accordion>
+
+  <Accordion title="My VPN shows as active but no SOCKS5 port was found — am I safe?">
+    Partially. The absence of an open SOCKS5 proxy means the most severe leak vector — resolving your VPN server's exit IP through a local proxy — is closed.
+
+    However, YourVPNDead will still detect that a VPN is active through:
+
+    - `NetworkCapabilities.hasTransport(TRANSPORT_VPN)` — a public API
+    - The internal `IS_VPN` and `VpnTransportInfo` flags visible in `caps.toString()`
+    - TUN/TAP/WireGuard interface names in `NetworkInterface.getNetworkInterfaces()`
+    - MTU anomalies (WireGuard: 1420, OpenVPN: ~1400, VLESS/Trojan: 1380–1400 vs. standard 1500)
+    - Routing table analysis via `/proc/net/route`
+    - Installed VPN app detection (19 known packages checked)
+
+    No combination of settings makes a VPN fully undetectable at the OS level on an unrooted Android device. The SOCKS5 fix closes the exit IP leak specifically.
+  </Accordion>
+
+  <Accordion title="What is split tunneling and does it help with privacy?">
+    Split tunneling routes only selected apps through the VPN tunnel, sending the rest over the direct connection. YourVPNDead detects it by comparing the direct IP (resolved without the proxy) against the proxy IP (resolved through the SOCKS5 inbound). When they differ, split tunneling is confirmed.
+
+    Split tunneling does **not** prevent SOCKS5 leaks. The local SOCKS5 inbound is created regardless of which apps are tunneled — any app on the device can connect to it, including apps that are routed outside the VPN. This is the core of the threat: an app excluded from the VPN can still use the proxy to reach your VPN server.
+  </Accordion>
+
+  <Accordion title="Why does Android Work Profile not protect against loopback scanning?">
+    Android Work Profile isolation applies to storage, contacts, app data, and inter-app communication. It does not extend to the network stack.
+
+    The loopback interface (`127.0.0.1`) is shared across all user profiles on the same device. A VPN client running in the personal profile opens a SOCKS5 port on `127.0.0.1:10808`; an app in the work profile can connect to that port just as easily. The same applies in reverse.
+
+    Tools like Shelter, Island, Insular, and Samsung Knox all rely on the same Android Work Profile mechanism and are subject to the same limitation. YourVPNDead's `ProfileDetector` detects which isolation method is in use and explicitly reports that loopback is not protected.
+  </Accordion>
+
+  <Accordion title="What is CVE-2023-43644?">
+    [CVE-2023-43644](https://github.com/advisories/GHSA-r5hm-mp3j-285g) is a CVSS 9.1 vulnerability in sing-box where the SOCKS5 authentication mechanism could be bypassed. An attacker who connected to an auth-protected sing-box SOCKS5 inbound could, under the conditions described in the advisory, complete the handshake without valid credentials.
+
+    It affects NekoBox, Hiddify, Karing, Throne, and any other application built on sing-box. The fix is to update to a patched version of sing-box. YourVPNDead's `AuthProbe` tests for both no-auth acceptance and common credential pairs; if a port accepts `\x05\x01\x00` (no-auth handshake) it is reported as CRITICAL regardless of whether auth is configured.
+  </Accordion>
+
+  <Accordion title="Is it safe to use the official WireGuard app?">
+    The official WireGuard app does not expose a SOCKS5 proxy, an HTTP proxy, or any REST or gRPC API on localhost. It is not vulnerable to the proxy leak described in this documentation.
+
+    YourVPNDead will still detect that WireGuard is active through:
+
+    - `TRANSPORT_VPN` flag on the active network
+    - `wg0` (or similar `wg\d+`) interface in `NetworkInterface.getNetworkInterfaces()`
+    - MTU anomaly: WireGuard uses MTU 1420 (standard is 1500, overhead is 80 bytes)
+    - The `com.wireguard.android` package in the installed app check
+
+    Detection of VPN presence is not the same as an IP leak. With WireGuard, a hostile app can confirm that a VPN is running and identify it as WireGuard, but cannot retrieve the server's IP through a local proxy.
+  </Accordion>
+
+  <Accordion title="What does 'Clash API' mean?">
+    mihomo (formerly Clash Meta) and sing-box include a REST API that is compatible with the Clash dashboard web interface. When enabled, it listens on localhost — port 9090 for mihomo, port 19090 for sing-box.
+
+    Without a `secret` token configured, any app with `INTERNET` permission can make unauthenticated requests to:
+
+    - `GET /connections` — returns all active connections, including `destinationIP` for each one
+    - `GET /proxies` — lists all configured proxy servers and their addresses
+    - `GET /configs` — returns the running configuration
+
+    This is a separate vulnerability from the SOCKS5 proxy leak. Securing SOCKS5 does not close the Clash API surface. YourVPNDead's `ClashAPIProbe` checks both ports and reports accessible endpoints as CRITICAL findings.
+  </Accordion>
+
+  <Accordion title="Can I use YourVPNDead as a continuous background monitor?">
+    No. YourVPNDead is a point-in-time scanner. It runs a 14-phase scan on demand and produces a single report. It does not run in the background, does not monitor port changes, and does not alert you when a new VPN client is installed.
+
+    Run it manually in these situations:
+
+    - After changing any VPN client setting (inbound port, auth config, API port)
+    - After installing a new app that might probe your setup
+    - After updating your VPN client to a new version
+    - After switching between VPN clients
+  </Accordion>
+
+  <Accordion title="What does CRITICAL severity mean in scan results?">
+    CRITICAL (`Severity.CRITICAL` in the scan model) means an active, confirmed vulnerability was found during the scan — not a theoretical risk. Typical CRITICAL findings are:
+
+    - An open SOCKS5 proxy that accepted a no-auth handshake (`\x05\x01\x00` → `\x05\x00`)
+    - A Clash API endpoint that returned data without a secret token
+    - An xray gRPC service that responded to the HTTP/2 connection preface
+
+    All three indicate that a hostile app could, right now, extract your VPN server's IP address or configuration. Take immediate action: disable the exposed port or uninstall the offending client. WARNING findings indicate detected VPN presence without an active leak; INFO findings are informational only.
+  </Accordion>
+
+  <Accordion title="How does the xray gRPC API leak work?">
+    xray-core includes a management interface called `HandlerService` that is exposed over gRPC (HTTP/2) on localhost. YourVPNDead's `XrayAPIDetector` identifies it using the standard HTTP/2 connection preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) followed by an empty SETTINGS frame. If the server responds with a valid HTTP/2 SETTINGS ACK, the service is confirmed as accessible.
+
+    Ports checked: 10085, 19085, 23456, 8001, 62789, 8080, 10086.
+
+    If the gRPC API is accessible, a hostile app can call `HandlerService` methods to dump the running xray configuration — including outbound server addresses, UUIDs, and encryption keys. This is the vulnerability present in Happ and is not fixable through configuration. The [Habr article on the VLESS critical vulnerability](https://habr.com/ru/articles/1020080/) provides additional context on this attack surface.
+  </Accordion>
+</AccordionGroup>

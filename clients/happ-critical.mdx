@@ -1,0 +1,118 @@
+---
+title: "Happ: critically vulnerable — remove immediately"
+description: "Happ (xray-core) exposes both an unauthenticated SOCKS5 proxy and an unprotected xray gRPC API, allowing full config dump including encryption keys."
+---
+
+Happ (`com.happproxy`) is an xray-core VPN client with a unique dual vulnerability: it exposes an unauthenticated SOCKS5 proxy on localhost and leaves the xray gRPC HandlerService accessible without authentication. The gRPC API allows any app on the device to dump the complete xray configuration — including VLESS UUIDs, server addresses, and transport parameters. This is not just a server IP leak. It is full credential compromise.
+
+<Warning>
+Happ is critically vulnerable. Remove it from your device immediately. The xray gRPC service may continue running in the background even if you have not recently opened the app.
+</Warning>
+
+## Vulnerability summary
+
+| Property | Value |
+|---|---|
+| Package name | `com.happproxy` |
+| Core | xray-core |
+| SOCKS5 port | Exposed, no auth |
+| gRPC API ports | 10085, 19085 (also scanned: 23456, 8001, 62789, 8080, 10086) |
+| Auth by default | None for both SOCKS5 and gRPC |
+| Status | **Critical — remove immediately** |
+
+## The two vulnerabilities
+
+### Vulnerability 1: unauthenticated SOCKS5 proxy
+
+Like v2rayNG, Happ starts an xray-core SOCKS5 inbound on localhost with no username or password. The RFC 1928 no-auth handshake succeeds immediately:
+
+```
+Client → \x05\x01\x00        (version 5, 1 method: no-auth)
+Server ← \x05\x00            (version 5, selected: no-auth)
+```
+
+Any app can then connect through this proxy and reach destinations routed through the VPN tunnel, including external IP resolution endpoints that reveal the server's public address.
+
+### Vulnerability 2: exposed xray gRPC HandlerService
+
+This is what makes Happ uniquely dangerous. xray-core provides a gRPC management API (`HandlerService`, `StatsService`, `LoggerService`) that is intended for local administration. In Happ, this API is reachable on `127.0.0.1` without any authentication token or TLS client certificate.
+
+The gRPC API allows a caller to:
+
+- Export the full xray JSON configuration at runtime
+- Read active inbound and outbound handler definitions, including server addresses and ports
+- Read VLESS UUIDs (user identifiers used for authentication with the remote server)
+- Read transport settings (WebSocket paths, gRPC service names, TLS fingerprints)
+- Query real-time traffic statistics per user and inbound
+
+The VLESS UUID is equivalent to a password. With it, an attacker can authenticate to your VPN server directly, route traffic through your account, and identify you to the server operator.
+
+## Attack chain
+
+<Steps>
+  <Step title="Any app detects the gRPC port">
+    `XrayAPIDetector` (or any HTTP/2 client) sends the standard HTTP/2 connection preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) followed by an empty SETTINGS frame to port 10085 or 19085 on `127.0.0.1`. A valid HTTP/2 SETTINGS response with the xray server header confirms the HandlerService is present.
+  </Step>
+  <Step title="The attacker calls the config export method">
+    Using any gRPC client (or raw HTTP/2 framing), the attacker invokes `xray.app.proxyman.command.HandlerService/GetInboundUser` or similar methods. No authentication header is required. The server returns a full protobuf-encoded configuration response.
+  </Step>
+  <Step title="VLESS UUIDs and server addresses are extracted">
+    The configuration contains one or more outbound definitions. Each VLESS outbound includes the remote server address, port, and the user UUID. These credentials are sufficient to connect to the VPN server as the legitimate user.
+  </Step>
+  <Step title="The SOCKS5 proxy confirms the live server IP">
+    In parallel, any app can use the unauthenticated SOCKS5 proxy to resolve the VPN server's public IP via `api.ipify.org`, confirming the server is reachable and correlating the UUID with a specific server.
+  </Step>
+</Steps>
+
+## Severity comparison
+
+| Client | SOCKS5 leak | Config dump | Credential exposure |
+|---|---|---|---|
+| v2rayNG | Yes | No | No |
+| NekoBox | Yes | No | No |
+| Hiddify | Yes | No | No |
+| Karing | Yes | No | No |
+| Throne | Yes | No | No |
+| **Happ** | **Yes** | **Yes** | **Yes — VLESS UUIDs** |
+
+Every other vulnerable client allows resolving your VPN server's IP. Happ additionally allows extracting the credentials needed to impersonate you on that server.
+
+## Detection by YourVPNDead
+
+YourVPNDead detects both Happ vulnerabilities through dedicated probes.
+
+### Package detection
+
+`DirectSignsChecker.checkKnownVpnApps()` queries `PackageManager` for `com.happproxy` (listed as `"HAPP VPN"` in `KNOWN_VPN_APPS`). On Android 11 and above this works because `com.happproxy` is declared in the `<queries>` block of `AndroidManifest.xml`.
+
+### gRPC detection via XrayAPIDetector
+
+`XrayAPIDetector` probes the following ports in order: 10085, 19085, 23456, 8001, 62789, 8080, 10086. The detection method is:
+
+1. Open a TCP connection to `127.0.0.1:<port>`
+2. Send the HTTP/2 connection preface: `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`
+3. Send a SETTINGS frame: `\x00\x00\x00\x04\x00\x00\x00\x00\x00`
+4. Read the server's response
+
+A valid HTTP/2 SETTINGS ACK or SETTINGS frame in the response confirms the xray gRPC service is present. This check requires no prior knowledge of which specific gRPC methods are available — the HTTP/2 handshake alone is sufficient to fingerprint the service.
+
+### SOCKS5 detection
+
+The SOCKS5 probe operates identically to the v2rayNG detection: RFC 1928 greeting, no-auth response confirmation, followed by an `ExitIPResolver` query through the proxy.
+
+## Why the service may still be running
+
+Android VPN services run as foreground services and can remain active after the user navigates away from the app. If Happ was ever started on the device and the VPN was not explicitly disconnected, the xray-core process may still be listening on its ports. YourVPNDead's scan will detect this regardless of whether the Happ UI is visible.
+
+<Note>
+After uninstalling Happ, reboot the device to ensure no residual xray-core process remains in memory. Verify with YourVPNDead that ports 10085 and 19085 no longer appear as listening after the reboot.
+</Note>
+
+## Mitigation
+
+There is no safe configuration for Happ on a shared-trust device.
+
+- **Remove `com.happproxy` from the device immediately.**
+- If you need an xray-core client, use v2rayNG with the SOCKS5 inbound disabled, or a client that does not expose the gRPC management API.
+- Change any VLESS UUIDs that were configured in Happ. Treat them as compromised credentials.
+- Notify your VPN server operator if you suspect the UUIDs were accessed by another app.
